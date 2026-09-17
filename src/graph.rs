@@ -1,8 +1,6 @@
 //! Graph storage: memories as `(:Memory)` nodes with typed relations in Neo4j.
 //! Neo4j is the source of truth; Qdrant is only a rebuildable index.
 //!
-//! Mirrors packages/memory-server/src/graph.ts.
-
 use async_trait::async_trait;
 use neo4rs::{BoltType, Graph, Node, Query};
 use serde::Serialize;
@@ -263,11 +261,15 @@ impl GraphStore for Neo4jGraphStore {
 // In-memory store for unit tests (mirrors Neo4j semantics used above)
 // ---------------------------------------------------------------------------
 
+// used by unit/integration tests only
+#[allow(dead_code)]
 struct InMemoryInner {
     memories: Vec<MemoryRecord>,
     edges: Vec<(String, String, String)>, // (fromId, toId, relation)
 }
 
+// used by unit tests only
+#[allow(dead_code)]
 pub struct InMemoryGraphStore {
     inner: AsyncMutex<InMemoryInner>,
 }
@@ -278,6 +280,7 @@ impl Default for InMemoryGraphStore {
     }
 }
 
+#[allow(dead_code)]
 impl InMemoryGraphStore {
     pub fn new() -> Self {
         Self {
@@ -330,23 +333,23 @@ impl GraphStore for InMemoryGraphStore {
         };
         let mut related = Vec::new();
         for (from, to, relation) in &inner.edges {
-            if from == id {
-                if let Some(t) = inner.memories.iter().find(|m| &m.id == to) {
-                    related.push(RelatedMemory {
-                        memory: t.clone(),
-                        relation: relation.clone(),
-                        direction: "out".to_string(),
-                    });
-                }
+            if from == id
+                && let Some(t) = inner.memories.iter().find(|m| &m.id == to)
+            {
+                related.push(RelatedMemory {
+                    memory: t.clone(),
+                    relation: relation.clone(),
+                    direction: "out".to_string(),
+                });
             }
-            if to == id {
-                if let Some(t) = inner.memories.iter().find(|m| &m.id == from) {
-                    related.push(RelatedMemory {
-                        memory: t.clone(),
-                        relation: relation.clone(),
-                        direction: "in".to_string(),
-                    });
-                }
+            if to == id
+                && let Some(t) = inner.memories.iter().find(|m| &m.id == from)
+            {
+                related.push(RelatedMemory {
+                    memory: t.clone(),
+                    relation: relation.clone(),
+                    direction: "in".to_string(),
+                });
             }
         }
         Ok(Some(MemoryWithRelated {
@@ -379,9 +382,9 @@ impl GraphStore for InMemoryGraphStore {
 mod tests {
     use super::*;
 
-    // Integration tests against a scratch Neo4j.
-    // Skipped unless NEO4J_TEST_URI is set — scripts/test-integration.sh
-    // starts a throwaway container and provides it.
+    // Integration tests against a live Neo4j.
+    // Skipped unless NEO4J_TEST_URI is set (e.g. point it at a throwaway
+    // container: docker run -p 127.0.0.1:7687:7687 -e NEO4J_AUTH=neo4j/testpassword neo4j:5-community)
     fn uri() -> Option<String> {
         std::env::var("NEO4J_TEST_URI").ok().filter(|u| !u.is_empty())
     }

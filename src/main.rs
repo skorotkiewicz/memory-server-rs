@@ -1,4 +1,4 @@
-//! Memory MCP server entrypoint (Rust port of packages/memory-server).
+//! Memory MCP server entrypoint.
 //!
 //! Env:
 //!   NEO4J_URI (default bolt://127.0.0.1:7687)
@@ -36,10 +36,10 @@ fn env_nonempty(name: &str) -> Option<String> {
 fn neo4j_credentials() -> (String, String, String) {
     let uri = env_or("NEO4J_URI", "bolt://127.0.0.1:7687");
     // conventional "user/password" from the neo4j image
-    if let Some(auth) = env_nonempty("NEO4J_AUTH") {
-        if let Some(idx) = auth.find('/') {
-            return (uri, auth[..idx].to_string(), auth[idx + 1..].to_string());
-        }
+    if let Some(auth) = env_nonempty("NEO4J_AUTH")
+        && let Some(idx) = auth.find('/')
+    {
+        return (uri, auth[..idx].to_string(), auth[idx + 1..].to_string());
     }
     (
         uri,

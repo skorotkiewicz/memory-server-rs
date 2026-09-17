@@ -3,8 +3,6 @@
 //! - OpenAI-compatible /embeddings endpoint — user-configured
 //! - hash embeddings — deterministic fake for unit tests
 //!
-//! Mirrors packages/memory-server/src/embeddings.ts.
-
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use std::path::PathBuf;
@@ -173,10 +171,12 @@ impl EmbeddingProvider for LocalEmbeddings {
 /// Deterministic local embedding for unit tests.
 /// Hashes text into a fixed-dimension vector. NOT semantically meaningful —
 /// used only in unit tests where semantics don't matter.
+#[allow(dead_code)]
 pub struct HashEmbeddings {
     dims: usize,
 }
 
+#[allow(dead_code)]
 impl HashEmbeddings {
     pub fn new(dims: usize) -> Self {
         Self { dims }
@@ -226,14 +226,14 @@ pub enum EmbeddingsProviderKind {
 }
 
 pub fn create_embedding_provider(config: &EmbeddingsConfig) -> Box<dyn EmbeddingProvider> {
-    if config.provider == EmbeddingsProviderKind::OpenAICompatible {
-        if let (Some(baseurl), Some(model)) = (&config.baseurl, &config.model) {
-            return Box::new(OpenAICompatibleEmbeddings::new(
-                baseurl,
-                config.apikey.as_deref().unwrap_or(""),
-                model,
-            ));
-        }
+    if config.provider == EmbeddingsProviderKind::OpenAICompatible
+        && let (Some(baseurl), Some(model)) = (&config.baseurl, &config.model)
+    {
+        return Box::new(OpenAICompatibleEmbeddings::new(
+            baseurl,
+            config.apikey.as_deref().unwrap_or(""),
+            model,
+        ));
     }
     Box::new(LocalEmbeddings::new(local_cache_path()))
 }

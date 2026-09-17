@@ -1,8 +1,6 @@
 //! Vector storage: memory embeddings in Qdrant, keyed by Neo4j memory id.
 //! The index is rebuildable at any time from the graph (reindex()).
 //!
-//! Mirrors packages/memory-server/src/vectors.ts.
-
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use qdrant_client::qdrant::{
@@ -36,11 +34,13 @@ pub struct VectorSearchHit {
 #[async_trait]
 pub trait VectorStore: Send + Sync {
     /// creates the collection if missing; no-op otherwise
+    #[allow(dead_code)]
     async fn init(&self) -> anyhow::Result<()>;
     async fn upsert(&self, record: &VectorRecord) -> anyhow::Result<()>;
     async fn search(&self, vector: &[f32], top_k: usize) -> anyhow::Result<Vec<VectorSearchHit>>;
     async fn delete(&self, memory_id: &str) -> anyhow::Result<()>;
     async fn delete_all(&self) -> anyhow::Result<()>;
+    #[allow(dead_code)]
     async fn count(&self) -> anyhow::Result<u64>;
     /// embedding model names present in the index (for drift detection)
     async fn models(&self) -> anyhow::Result<Vec<String>>;
@@ -74,6 +74,8 @@ fn point_id(memory_id: &str) -> PointId {
 
 pub struct QdrantVectorStore {
     client: Qdrant,
+    /// only read by init() — integration tests set it explicitly
+    #[allow(dead_code)]
     dimensions: Option<u32>,
     collection_ready: Mutex<bool>,
 }
@@ -239,6 +241,7 @@ fn payload_string(
 }
 
 /// Deterministic in-memory vector store for unit tests.
+#[allow(dead_code)]
 pub struct InMemoryVectorStore {
     points: Mutex<Vec<VectorRecord>>,
 }
@@ -249,6 +252,7 @@ impl Default for InMemoryVectorStore {
     }
 }
 
+#[allow(dead_code)]
 impl InMemoryVectorStore {
     pub fn new() -> Self {
         Self {
@@ -315,6 +319,7 @@ impl VectorStore for InMemoryVectorStore {
     }
 }
 
+#[allow(dead_code)]
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     let mut dot = 0.0;
     let mut na = 0.0;
@@ -359,9 +364,9 @@ mod tests {
         }
     }
 
-    // Integration tests against a scratch Qdrant.
-    // Skipped unless QDRANT_TEST_URL is set — scripts/test-integration.sh
-    // starts a throwaway container and provides it.
+    // Integration tests against a live Qdrant.
+    // Skipped unless QDRANT_TEST_URL is set (gRPC port, e.g.
+    // docker run -p 127.0.0.1:6334:6334 qdrant/qdrant)
     mod integration {
         use super::*;
 

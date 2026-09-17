@@ -1,1 +1,4 @@
 target
+local_cache
+.env
+store

@@ -3,8 +3,8 @@
 //! concurrent clients, and restarts lose nothing because all state lives in
 //! Neo4j/Qdrant.
 //!
-//! Mirrors packages/memory-server/src/server.ts (which uses the TS MCP SDK;
-//! here the stateless JSON-RPC surface is implemented directly on axum).
+//! MCP tools: memory_store/search/get/link/delete/context, served stateless
+//! over Streamable HTTP (the JSON-RPC surface is implemented directly on axum).
 
 use crate::service::MemoryService;
 use anyhow::Result;
@@ -150,7 +150,7 @@ async fn handle_rpc_message(state: &AppState, message: &Value) -> Option<Value> 
     };
     let params = message.get("params").cloned().unwrap_or(json!({}));
 
-    let response = match method.as_str() {
+    match method.as_str() {
         "initialize" => {
             let pv = params
                 .get("protocolVersion")
@@ -170,8 +170,7 @@ async fn handle_rpc_message(state: &AppState, message: &Value) -> Option<Value> 
         "tools/list" => Some(json_rpc_result(id, json!({ "tools": tools_list() }))),
         "tools/call" => Some(handle_tools_call(state, id, &params).await),
         other => Some(json_rpc_error(id, -32601, &format!("Method not found: {other}"))),
-    };
-    response
+    }
 }
 
 async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value {
@@ -197,7 +196,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
             match args.get($key) {
                 None | Some(Value::Null) => None,
                 Some(v) => match v.as_u64() {
-                    Some(n) if n >= 1 && n <= $max => Some(n as usize),
+                    Some(n) if (1..=$max).contains(&n) => Some(n as usize),
                     _ => {
                         return json_rpc_error(
                             id,
@@ -234,7 +233,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 .and_then(|results| {
                     serde_json::to_value(results).map_err(|e| format!("{e}"))
                 })
-                .map(|results| text_content(results))
+                .map(text_content)
         }
         "memory_get" => {
             let memory_id = arg!("id");
@@ -273,7 +272,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 .and_then(|results| {
                     serde_json::to_value(results).map_err(|e| format!("{e}"))
                 })
-                .map(|results| text_content(results))
+                .map(text_content)
         }
         other => {
             return json_rpc_error(id, -32602, &format!("Unknown tool: {other}"));
@@ -796,7 +795,7 @@ mod tests {
         // client with the token works
         let (status, response) = rpc(secured.port, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), Some("s3cret")).await;
         assert_eq!(status, StatusCode::OK);
-        assert!(response["result"]["tools"].as_array().unwrap().len() > 0);
+        assert!(!response["result"]["tools"].as_array().unwrap().is_empty());
 
         secured.close().await;
     }

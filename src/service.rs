@@ -1,8 +1,6 @@
 //! Business logic: dual-write (Neo4j first, then Qdrant), hydration through
 //! the graph. Qdrant is a rebuildable index — reindex() heals any drift.
 //!
-//! Mirrors packages/memory-server/src/service.ts.
-
 use crate::embeddings::EmbeddingProvider;
 use crate::graph::{GraphStore, MemoryRecord, MemoryWithRelated};
 use crate::vectors::VectorRecord;
