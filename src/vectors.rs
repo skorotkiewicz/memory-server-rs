@@ -369,19 +369,25 @@ mod tests {
             std::env::var("QDRANT_TEST_URL").ok().filter(|u| !u.is_empty())
         }
 
-        async fn make_store() -> QdrantVectorStore {
+        /// serialize integration tests — they share one scratch collection
+        static QDRANT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+        async fn make_store() -> (QdrantVectorStore, tokio::sync::MutexGuard<'static, ()>) {
+            let guard = QDRANT_LOCK.lock().await;
             let store = QdrantVectorStore::new(&url().unwrap(), None, Some(4)).unwrap();
             store.init().await.unwrap();
             store.delete_all().await.unwrap();
-            store
+            (store, guard)
         }
 
         #[tokio::test]
         async fn init_is_idempotent() {
-            if url().is_none() {
-                return; // skipped: no QDRANT_TEST_URL
-            }
-            let store = make_store().await;
+            let url = match url() {
+                Some(url) => url,
+                None => return, // skipped: no QDRANT_TEST_URL
+            };
+            let store = QdrantVectorStore::new(&url, None, Some(4)).unwrap();
+            store.init().await.unwrap();
             store.init().await.unwrap(); // second call must not throw
         }
 
@@ -390,16 +396,16 @@ mod tests {
             if url().is_none() {
                 return; // skipped: no QDRANT_TEST_URL
             }
-            let store = make_store().await;
-            for id in [
-                "mem_00000000-0000-4000-8000-000000000001",
-                "mem_00000000-0000-4000-8000-000000000002",
-                "mem_00000000-0000-4000-8000-000000000003",
+            let (store, _guard) = make_store().await;
+            for (id, seed) in [
+                ("mem_00000000-0000-4000-8000-000000000001", 1),
+                ("mem_00000000-0000-4000-8000-000000000002", 1),
+                ("mem_00000000-0000-4000-8000-000000000003", 5),
             ] {
                 store
                     .upsert(&VectorRecord {
                         memory_id: id.to_string(),
-                        vector: fake_vector(1, 4),
+                        vector: fake_vector(seed, 4),
                         model: "m1".to_string(),
                     })
                     .await
@@ -426,7 +432,7 @@ mod tests {
             if url().is_none() {
                 return; // skipped: no QDRANT_TEST_URL
             }
-            let store = make_store().await;
+            let (store, _guard) = make_store().await;
             let hits = store.search(&fake_vector(1, 4), 5).await.unwrap();
             assert!(hits.is_empty());
         }
