@@ -149,3 +149,98 @@ impl MemoryService {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embeddings::HashEmbeddings;
+    use std::sync::Arc;
+    use crate::graph::InMemoryGraphStore;
+    use crate::vectors::{InMemoryVectorStore, VectorRecord, VectorStore};
+
+    fn make_service() -> (MemoryService, Arc<InMemoryVectorStore>) {
+        let vectors = Arc::new(InMemoryVectorStore::new());
+        let service = MemoryService::new(
+            Arc::new(InMemoryGraphStore::new()),
+            vectors.clone(),
+            Arc::new(HashEmbeddings::new(64)),
+        );
+        (service, vectors)
+    }
+
+    #[tokio::test]
+    async fn store_reindex_search_round_trip_heals_index_drift() {
+        let (service, vectors) = make_service();
+
+        let a = service
+            .store("alpha stores secrets in vault-7", None)
+            .await
+            .unwrap();
+        service
+            .store("the beta cluster is for staging", None)
+            .await
+            .unwrap();
+
+        // simulate index loss
+        vectors.delete_all().await.unwrap();
+        assert_eq!(vectors.count().await.unwrap(), 0);
+
+        // reindex rebuilds from the graph
+        let n = service.reindex().await.unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(vectors.count().await.unwrap(), 2);
+
+        let hits = service
+            .search("alpha stores secrets in vault-7", None)
+            .await
+            .unwrap();
+        assert_eq!(hits[0].memory.id, a.id);
+
+        // drift detection: index model matches current provider → empty drift
+        assert_eq!(service.embedding_model_drift().await.unwrap(), Vec::<String>::new());
+
+        // drift detection: foreign model in index → reported
+        vectors
+            .upsert(&VectorRecord {
+                memory_id: "mem_x".to_string(),
+                vector: vec![1.0, 0.0],
+                model: "old-model-v1".to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            service.embedding_model_drift().await.unwrap(),
+            vec!["old-model-v1".to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn search_hydrates_from_graph_and_skips_orphaned_vectors() {
+        let (service, vectors) = make_service();
+        let a = service
+            .store("deploy server 192.168.0.50", None)
+            .await
+            .unwrap();
+        let embedded = HashEmbeddings::new(64)
+            .embed("deploy server 192.168.0.50")
+            .await
+            .unwrap();
+        // orphaned vector: points at a memory that no longer exists in the graph
+        vectors
+            .upsert(&VectorRecord {
+                memory_id: "mem_orphan".to_string(),
+                vector: embedded.vector,
+                model: "h".to_string(),
+            })
+            .await
+            .unwrap();
+
+        let hits = service
+            .search("deploy server 192.168.0.50", Some(5))
+            .await
+            .unwrap();
+        // orphan skipped (not in graph), real memory returned
+        assert!(hits.iter().all(|h| h.memory.id != "mem_orphan"));
+        assert!(hits.iter().any(|h| h.memory.id == a.id));
+    }
+}

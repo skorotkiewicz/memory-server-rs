@@ -221,7 +221,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                         .filter_map(|t| t.as_str().map(String::from))
                         .collect::<Vec<String>>()
                 });
-            state.service.store(&text, tags).await.map(|record| text_content(serde_json::to_value(record).unwrap_or_default()))
+            state.service.store(&text, tags).await.map_err(|e| format!("{e:#}")).map(|record| text_content(serde_json::to_value(record).unwrap_or_default()))
         }
         "memory_search" => {
             let query = arg!("query");
@@ -230,9 +230,9 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 .service
                 .search(&query, top_k)
                 .await
+                .map_err(|e| format!("{e:#}"))
                 .and_then(|results| {
-                    serde_json::to_value(results)
-                        .map_err(|e| anyhow::anyhow!("{e}"))
+                    serde_json::to_value(results).map_err(|e| format!("{e}"))
                 })
                 .map(|results| text_content(results))
         }
@@ -250,7 +250,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
             let from_id = arg!("from_id");
             let to_id = arg!("to_id");
             let relation = arg!("relation");
-            state.service.link(&from_id, &to_id, &relation).await.map(|link| {
+            state.service.link(&from_id, &to_id, &relation).await.map_err(|e| format!("{e:#}")).map(|link| {
                 text_content(serde_json::to_value(link).unwrap_or_default())
             })
         }
@@ -269,8 +269,9 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 .service
                 .context(&message, top_k)
                 .await
+                .map_err(|e| format!("{e:#}"))
                 .and_then(|results| {
-                    serde_json::to_value(results).map_err(|e| anyhow::anyhow!("{e}"))
+                    serde_json::to_value(results).map_err(|e| format!("{e}"))
                 })
                 .map(|results| text_content(results))
         }
@@ -433,7 +434,7 @@ pub async fn start_memory_server(
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
     tokio::spawn(async move {
         let _ = axum::serve(listener, app)
-            .graceful_shutdown(async move {
+            .with_graceful_shutdown(async move {
                 let mut rx = shutdown_rx;
                 loop {
                     if *rx.borrow() {
@@ -451,4 +452,352 @@ pub async fn start_memory_server(
         port,
         shutdown: shutdown_tx,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::embeddings::HashEmbeddings;
+    use crate::graph::InMemoryGraphStore;
+    use crate::vectors::InMemoryVectorStore;
+
+    fn make_service() -> Arc<MemoryService> {
+        Arc::new(MemoryService::new(
+            Arc::new(InMemoryGraphStore::new()),
+            Arc::new(InMemoryVectorStore::new()),
+            Arc::new(HashEmbeddings::new(64)),
+        ))
+    }
+
+    async fn start_test_server(token: Option<&str>) -> MemoryServerHandle {
+        start_memory_server(
+            make_service(),
+            MemoryServerOptions {
+                port: 0,
+                token: token.map(String::from),
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn rpc(port: u16, body: Value, token: Option<&str>) -> (StatusCode, Value) {
+        let url = format!("http://127.0.0.1:{port}/mcp");
+        let client = reqwest::Client::new();
+        let mut request = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Accept", "application/json");
+        if let Some(tok) = token {
+            request = request.bearer_auth(tok);
+        }
+        let response = request.json(&body).send().await.unwrap();
+        let status = response.status();
+        let json: Value = response.json().await.unwrap();
+        (StatusCode::from_u16(status.as_u16()).unwrap(), json)
+    }
+
+    #[tokio::test]
+    async fn tool_listing_store_search_round_trip_and_shared_layer() {
+        let open = start_test_server(None).await;
+        assert!(open.port > 0);
+
+        // --- client 1: initialize + list tools
+        let (status, response) = rpc(
+            open.port,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response["result"]["serverInfo"]["name"], "cognitive-memory");
+
+        let (status, response) = rpc(
+            open.port,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "tools/list" }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let mut names: Vec<String> = response["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["name"].as_str().unwrap().to_string())
+            .collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec![
+                "memory_context",
+                "memory_delete",
+                "memory_get",
+                "memory_link",
+                "memory_search",
+                "memory_store",
+            ]
+        );
+
+        // --- client 1 stores a memory
+        let (status, response) = rpc(
+            open.port,
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "memory_store", "arguments": { "text": "the deploy server is at 192.168.0.50", "tags": ["infra"] } }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let stored: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert!(stored["id"].as_str().unwrap().starts_with("mem_"));
+
+        // --- client 2 (simulating an external harness) finds it — one shared layer
+        let (status, response) = rpc(
+            open.port,
+            json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "memory_search", "arguments": { "query": "the deploy server is at 192.168.0.50" } }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let found: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(found.as_array().unwrap().len(), 1);
+        assert_eq!(found[0]["memory"]["id"], stored["id"]);
+
+        // --- context tool returns the memory for a related message
+        let (status, response) = rpc(
+            open.port,
+            json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": { "name": "memory_context", "arguments": { "message": "the deploy server is at 192.168.0.50" } }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ctx: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(ctx.as_array().unwrap().len(), 1);
+
+        open.close().await;
+    }
+
+    #[tokio::test]
+    async fn get_and_delete_round_trip() {
+        let server = start_test_server(None).await;
+
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "memory_store", "arguments": { "text": "k8s cluster prod-1" } }
+            }),
+            None,
+        )
+        .await;
+        let stored: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        let id = stored["id"].as_str().unwrap().to_string();
+
+        // get
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                "params": { "name": "memory_get", "arguments": { "id": id } }
+            }),
+            None,
+        )
+        .await;
+        let memory: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(memory["text"], "k8s cluster prod-1");
+        assert_eq!(memory["tags"].as_array().map(|a| a.len()), Some(0));
+
+        // get missing
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "memory_get", "arguments": { "id": "mem_missing" } }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "memory \"mem_missing\" not found"
+        );
+
+        // delete
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "memory_delete", "arguments": { "id": id } }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(response["result"]["content"][0]["text"], format!("deleted {id}"));
+
+        // delete again → not found
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+                "params": { "name": "memory_delete", "arguments": { "id": id } }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            format!("memory \"{id}\" not found")
+        );
+
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn link_and_context_round_trip() {
+        let server = start_test_server(None).await;
+
+        let store = |text: &str, id: i32| {
+            rpc(
+                server.port,
+                json!({
+                    "jsonrpc": "2.0", "id": id, "method": "tools/call",
+                    "params": { "name": "memory_store", "arguments": { "text": text } }
+                }),
+                None,
+            )
+        };
+        let (_, r1) = store("rust rewrite done", 1).await;
+        let (_, r2) = store("fastembed ported to rust", 2).await;
+        let a: Value = serde_json::from_str(r1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let b: Value = serde_json::from_str(r2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                "params": { "name": "memory_link", "arguments": {
+                    "from_id": a["id"], "to_id": b["id"], "relation": "RELATED_TO" } }
+            }),
+            None,
+        )
+        .await;
+        let link: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(link["relation"], "RELATED_TO");
+        assert_eq!(link["fromId"], a["id"]);
+        assert_eq!(link["toId"], b["id"]);
+
+        // get expands the neighborhood
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+                "params": { "name": "memory_get", "arguments": { "id": a["id"] } }
+            }),
+            None,
+        )
+        .await;
+        let memory: Value =
+            serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(memory["related"].as_array().unwrap().len(), 1);
+        assert_eq!(memory["related"][0]["direction"], "out");
+
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_and_method_error_cleanly() {
+        let server = start_test_server(None).await;
+
+        let (_, response) = rpc(
+            server.port,
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": { "name": "no_such_tool", "arguments": {} }
+            }),
+            None,
+        )
+        .await;
+        assert_eq!(response["error"]["code"], -32602);
+
+        let (_, response) = rpc(
+            server.port,
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
+            None,
+        )
+        .await;
+        assert_eq!(response["error"]["code"], -32601);
+
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn health_endpoint() {
+        let server = start_test_server(None).await;
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://127.0.0.1:{}/health", server.port))
+            .send()
+            .await
+            .unwrap();
+        assert!(response.status().is_success());
+        let body: Value = response.json().await.unwrap();
+        assert_eq!(body["ok"], true);
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn bearer_token_unauthenticated_rejected_before_any_tool_runs() {
+        let secured = start_test_server(Some("s3cret")).await;
+
+        // raw request without/with-wrong token → 401, never reaches tools
+        for token in [None, Some("wrong")] {
+            let client = reqwest::Client::new();
+            let mut request = client
+                .post(format!("http://127.0.0.1:{}/mcp", secured.port))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }));
+            if let Some(tok) = token {
+                request = request.bearer_auth(tok);
+            }
+            let response = request.send().await.unwrap();
+            assert_eq!(response.status(), 401);
+        }
+
+        // health is also behind the token
+        let client = reqwest::Client::new();
+        let response = client
+            .get(format!("http://127.0.0.1:{}/health", secured.port))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), 401);
+
+        // client with the token works
+        let (status, response) = rpc(secured.port, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), Some("s3cret")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(response["result"]["tools"].as_array().unwrap().len() > 0);
+
+        secured.close().await;
+    }
 }

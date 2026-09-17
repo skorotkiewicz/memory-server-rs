@@ -6,7 +6,7 @@
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use qdrant_client::qdrant::{
-    points_selector, CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter, PointId,
+    CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter, PointId,
     PointStruct, PointsIdsList, QueryPointsBuilder, ScrollPointsBuilder, UpsertPointsBuilder,
     VectorParamsBuilder,
 };
@@ -68,9 +68,8 @@ pub fn uuid_to_ulid(memory_id: &str) -> String {
 }
 
 fn point_id(memory_id: &str) -> PointId {
-    // uuid_to_ulid always returns a parseable uuid
-    let u = Uuid::parse_str(&uuid_to_ulid(memory_id)).expect("uuid-shaped id");
-    PointId::from(u)
+    // uuid_to_ulid always returns a uuid-shaped string
+    PointId::from(uuid_to_ulid(memory_id))
 }
 
 pub struct QdrantVectorStore {
@@ -168,7 +167,7 @@ impl VectorStore for QdrantVectorStore {
             .result
             .iter()
             .filter_map(|point| {
-                let memory_id = payload_string(point, "memoryId")?;
+                let memory_id = payload_string(&point.payload, "memoryId")?;
                 if memory_id.is_empty() {
                     return None;
                 }
@@ -216,7 +215,7 @@ impl VectorStore for QdrantVectorStore {
             .await?;
         let mut names = BTreeSet::new();
         for point in &response.result {
-            if let Some(model) = payload_string(point, "model") {
+            if let Some(model) = payload_string(&point.payload, "model") {
                 names.insert(model);
             }
         }
@@ -228,9 +227,12 @@ impl VectorStore for QdrantVectorStore {
     }
 }
 
-fn payload_string(point: &qdrant_client::qdrant::ScoredPoint, key: &str) -> Option<String> {
-    let value = point.payload.get(key)?;
-    match &value.kind? {
+fn payload_string(
+    payload: &std::collections::HashMap<String, qdrant_client::qdrant::Value>,
+    key: &str,
+) -> Option<String> {
+    let value = payload.get(key)?;
+    match value.kind.as_ref()? {
         qdrant_client::qdrant::value::Kind::StringValue(s) => Some(s.clone()),
         _ => None,
     }
@@ -324,4 +326,109 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
     }
     let denom = na.sqrt() * nb.sqrt();
     dot / if denom != 0.0 { denom } else { 1.0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fake_vector(seed: u32, dim: usize) -> Vec<f32> {
+        (0..dim)
+            .map(|i| ((seed * (i as u32 + 3)) % 7) as f32 / 7.0)
+            .collect()
+    }
+
+    mod unit {
+        use super::*;
+
+        #[test]
+        fn strips_mem_prefix_deterministically() {
+            let id = "mem_123e4567-e89b-42d3-a456-426614174000";
+            assert_eq!(
+                uuid_to_ulid(id),
+                "123e4567-e89b-42d3-a456-426614174000"
+            );
+            assert_eq!(uuid_to_ulid(id), uuid_to_ulid(id));
+        }
+
+        #[test]
+        fn non_uuid_ids_get_a_deterministic_uuid_shaped_hash() {
+            let out = uuid_to_ulid("weird-id");
+            assert!(Uuid::parse_str(&out).is_ok(), "not uuid-shaped: {out}");
+            assert_eq!(out, uuid_to_ulid("weird-id"));
+        }
+    }
+
+    // Integration tests against a scratch Qdrant.
+    // Skipped unless QDRANT_TEST_URL is set — scripts/test-integration.sh
+    // starts a throwaway container and provides it.
+    mod integration {
+        use super::*;
+
+        fn url() -> Option<String> {
+            std::env::var("QDRANT_TEST_URL").ok().filter(|u| !u.is_empty())
+        }
+
+        async fn make_store() -> QdrantVectorStore {
+            let store = QdrantVectorStore::new(&url().unwrap(), None, Some(4)).unwrap();
+            store.init().await.unwrap();
+            store.delete_all().await.unwrap();
+            store
+        }
+
+        #[tokio::test]
+        async fn init_is_idempotent() {
+            if url().is_none() {
+                return; // skipped: no QDRANT_TEST_URL
+            }
+            let store = make_store().await;
+            store.init().await.unwrap(); // second call must not throw
+        }
+
+        #[tokio::test]
+        async fn upsert_search_delete_round_trip() {
+            if url().is_none() {
+                return; // skipped: no QDRANT_TEST_URL
+            }
+            let store = make_store().await;
+            for id in [
+                "mem_00000000-0000-4000-8000-000000000001",
+                "mem_00000000-0000-4000-8000-000000000002",
+                "mem_00000000-0000-4000-8000-000000000003",
+            ] {
+                store
+                    .upsert(&VectorRecord {
+                        memory_id: id.to_string(),
+                        vector: fake_vector(1, 4),
+                        model: "m1".to_string(),
+                    })
+                    .await
+                    .unwrap();
+            }
+
+            assert_eq!(store.count().await.unwrap(), 3);
+
+            let hits = store.search(&fake_vector(1, 4), 2).await.unwrap();
+            assert_eq!(hits.len(), 2);
+            // exact-match vectors score highest
+            assert!(hits[0].memory_id.ends_with("0001") || hits[0].memory_id.ends_with("0002"));
+            assert!(hits[0].score > 0.99);
+
+            store
+                .delete("mem_00000000-0000-4000-8000-000000000001")
+                .await
+                .unwrap();
+            assert_eq!(store.count().await.unwrap(), 2);
+        }
+
+        #[tokio::test]
+        async fn empty_search_returns_empty_result() {
+            if url().is_none() {
+                return; // skipped: no QDRANT_TEST_URL
+            }
+            let store = make_store().await;
+            let hits = store.search(&fake_vector(1, 4), 5).await.unwrap();
+            assert!(hits.is_empty());
+        }
+    }
 }

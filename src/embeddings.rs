@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use std::path::PathBuf;
+use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 #[derive(Debug, Clone)]
@@ -103,7 +104,7 @@ impl EmbeddingProvider for OpenAICompatibleEmbeddings {
 /// time. The model file is downloaded once and cached (respects
 /// FASTEMBED_CACHE_PATH so Docker can persist it in a volume).
 pub struct LocalEmbeddings {
-    embedder: OnceCell<tokio::sync::Mutex<fastembed::TextEmbedding>>,
+    embedder: OnceCell<Arc<std::sync::Mutex<fastembed::TextEmbedding>>>,
     cache_dir: Option<PathBuf>,
 }
 
@@ -117,11 +118,11 @@ impl LocalEmbeddings {
 
     async fn ensure_init(
         &self,
-    ) -> anyhow::Result<&tokio::sync::Mutex<fastembed::TextEmbedding>> {
+    ) -> anyhow::Result<Arc<std::sync::Mutex<fastembed::TextEmbedding>>> {
         self.embedder
             .get_or_try_init(|| async {
                 let cache_dir = self.cache_dir.clone();
-                tokio::task::spawn_blocking(move || {
+                let init = tokio::task::spawn_blocking(move || {
                     let mut options =
                         fastembed::TextInitOptions::new(fastembed::EmbeddingModel::BGESmallENV15);
                     if let Some(dir) = cache_dir {
@@ -130,9 +131,12 @@ impl LocalEmbeddings {
                     fastembed::TextEmbedding::try_new(options)
                 })
                 .await
-                .map_err(|e| anyhow::anyhow!("embedding init task panicked: {e}"))?
+                .map_err(|e| anyhow::anyhow!("embedding init task panicked: {e}"))? // join error
+                .map_err(|e| anyhow::anyhow!("fastembed init failed: {e}"))?; // fastembed error
+                Ok::<_, anyhow::Error>(Arc::new(std::sync::Mutex::new(init)))
             })
             .await
+            .cloned()
     }
 }
 
@@ -142,10 +146,12 @@ impl EmbeddingProvider for LocalEmbeddings {
         let embedder = self.ensure_init().await?;
         let text = text.to_string();
         let vectors = tokio::task::spawn_blocking(move || {
-            embedder
+            let mut guard = embedder
                 .lock()
-                .map_err(|e| anyhow::anyhow!("embedder mutex poisoned: {e}"))?
+                .map_err(|e| anyhow::anyhow!("embedder mutex poisoned: {e}"))?;
+            guard
                 .embed(vec![text], None)
+                .map_err(|e| anyhow::anyhow!("{e}"))
         })
         .await
         .map_err(|e| anyhow::anyhow!("embedding task panicked: {e}"))??;
@@ -234,4 +240,145 @@ pub fn create_embedding_provider(config: &EmbeddingsConfig) -> Box<dyn Embedding
 
 fn local_cache_path() -> Option<PathBuf> {
     std::env::var("FASTEMBED_CACHE_PATH").ok().map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::routing::post;
+    use axum::Json;
+    use std::sync::Arc as StdArc;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn openai_compatible_posts_to_embeddings_with_model_and_bearer_header() {
+        struct Captured {
+            auth: Option<String>,
+            body: serde_json::Value,
+        }
+        let (tx, rx) = oneshot::channel::<Captured>();
+        let capture = StdArc::new(std::sync::Mutex::new(Some(tx)));
+
+        let app = axum::Router::new().route(
+            "/embeddings",
+            post(move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                let capture = StdArc::clone(&capture);
+                async move {
+                    let _ = capture.lock().unwrap().take().unwrap().send(Captured {
+                        auth: headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok().map(String::from)),
+                        body,
+                    });
+                    axum::Json(serde_json::json!({ "data": [{ "embedding": [0.1, 0.2] }] }))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider =
+            OpenAICompatibleEmbeddings::new(&format!("http://{addr}"), "sk-test", "emb-1");
+        let result = provider.embed("hello").await.unwrap();
+        assert_eq!(result.vector, vec![0.1, 0.2]);
+        assert_eq!(result.model, "emb-1");
+
+        let captured = rx.await.unwrap();
+        assert_eq!(captured.body["model"], "emb-1");
+        assert_eq!(captured.body["input"], "hello");
+        assert_eq!(captured.auth.as_deref(), Some("Bearer sk-test"));
+    }
+
+    #[tokio::test]
+    async fn no_apikey_means_no_authorization_header() {
+        struct Captured {
+            auth: Option<String>,
+        }
+        let (tx, rx) = oneshot::channel::<Captured>();
+        let capture = StdArc::new(std::sync::Mutex::new(Some(tx)));
+
+        let app = axum::Router::new().route(
+            "/embeddings",
+            post(move |headers: axum::http::HeaderMap| {
+                let capture = StdArc::clone(&capture);
+                async move {
+                    let _ = capture.lock().unwrap().take().unwrap().send(Captured {
+                        auth: headers
+                            .get(axum::http::header::AUTHORIZATION)
+                            .and_then(|v| v.to_str().ok().map(String::from)),
+                    });
+                    axum::Json(serde_json::json!({ "data": [{ "embedding": [1.0] }] }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OpenAICompatibleEmbeddings::new(&format!("http://{addr}"), "", "emb-1");
+        provider.embed("hello").await.unwrap();
+        assert!(rx.await.unwrap().auth.is_none());
+    }
+
+    #[tokio::test]
+    async fn endpoint_error_surfaces_status_and_body() {
+        let app = axum::Router::new().route(
+            "/embeddings",
+            post(|| async {
+                (
+                    axum::http::StatusCode::NOT_IMPLEMENTED,
+                    axum::Json(serde_json::json!({ "error": "no embeddings support" })),
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let provider = OpenAICompatibleEmbeddings::new(&format!("http://{addr}"), "", "emb-1");
+        let err = format!("{:#}", provider.embed("hello").await.unwrap_err());
+        assert!(err.contains("501"), "missing status: {err}");
+        assert!(err.contains("no embeddings support"), "missing body: {err}");
+    }
+
+    #[test]
+    fn create_embedding_provider_selects_openai_compatible_when_configured() {
+        let p = create_embedding_provider(&EmbeddingsConfig {
+            provider: EmbeddingsProviderKind::OpenAICompatible,
+            baseurl: Some("http://x/v1".to_string()),
+            apikey: None,
+            model: Some("emb-1".to_string()),
+        });
+        assert_eq!(p.model(), "emb-1");
+    }
+
+    #[test]
+    fn create_embedding_provider_falls_back_to_local_semantic_model() {
+        let p = create_embedding_provider(&EmbeddingsConfig {
+            provider: EmbeddingsProviderKind::Local,
+            baseurl: None,
+            apikey: None,
+            model: None,
+        });
+        assert_eq!(p.model(), "bge-small-en-v1.5");
+    }
+
+    #[tokio::test]
+    async fn hash_embeddings_deterministic_normalized_fixed_dims() {
+        let h = HashEmbeddings::new(64);
+        let a = h.embed("hello world").await.unwrap();
+        let b = h.embed("hello world").await.unwrap();
+        assert_eq!(a.vector, b.vector);
+        assert_eq!(a.vector.len(), 64);
+        let norm: f32 = a.vector.iter().map(|v| v * v).sum::<f32>().sqrt();
+        assert!((norm - 1.0).abs() < 1e-5, "norm was {norm}");
+    }
 }

@@ -331,7 +331,7 @@ impl GraphStore for InMemoryGraphStore {
         let mut related = Vec::new();
         for (from, to, relation) in &inner.edges {
             if from == id {
-                if let Some(t) = inner.memories.iter().find(|m| m.id == to) {
+                if let Some(t) = inner.memories.iter().find(|m| &m.id == to) {
                     related.push(RelatedMemory {
                         memory: t.clone(),
                         relation: relation.clone(),
@@ -340,7 +340,7 @@ impl GraphStore for InMemoryGraphStore {
                 }
             }
             if to == id {
-                if let Some(t) = inner.memories.iter().find(|m| m.id == from) {
+                if let Some(t) = inner.memories.iter().find(|m| &m.id == from) {
                     related.push(RelatedMemory {
                         memory: t.clone(),
                         relation: relation.clone(),
@@ -372,5 +372,99 @@ impl GraphStore for InMemoryGraphStore {
 
     async fn close(&self) -> anyhow::Result<()> {
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Integration tests against a scratch Neo4j.
+    // Skipped unless NEO4J_TEST_URI is set — scripts/test-integration.sh
+    // starts a throwaway container and provides it.
+    fn uri() -> Option<String> {
+        std::env::var("NEO4J_TEST_URI").ok().filter(|u| !u.is_empty())
+    }
+
+    async fn make_store() -> Neo4jGraphStore {
+        let store = Neo4jGraphStore::connect(
+            &uri().unwrap(),
+            &std::env::var("NEO4J_TEST_USER").unwrap_or_else(|_| "neo4j".to_string()),
+            &std::env::var("NEO4J_TEST_PASSWORD").unwrap_or_else(|_| "testpassword".to_string()),
+        )
+        .await
+        .unwrap();
+        store.init().await.unwrap();
+        store
+    }
+
+    #[tokio::test]
+    async fn store_fetch_link_delete_round_trip() {
+        let store = match uri() {
+            Some(_) => make_store().await,
+            None => return, // skipped: no NEO4J_TEST_URI
+        };
+        let a = store
+            .store_memory("deploy server is at 192.168.0.50", Some(vec!["infra".to_string()]))
+            .await
+            .unwrap();
+        let b = store
+            .store_memory("the deploy user is called deploybot", None)
+            .await
+            .unwrap();
+        assert!(a.id.starts_with("mem_"));
+        assert!(!a.created_at.is_empty());
+        assert_ne!(b.id, a.id);
+
+        // link
+        let link = store.link_memories(&a.id, &b.id, "RELATED_TO").await.unwrap();
+        assert_eq!(link.relation, "RELATED_TO");
+
+        // fetch with graph neighborhood
+        let fetched = store.get_memory(&a.id).await.unwrap();
+        let fetched = fetched.expect("memory should exist");
+        assert_eq!(fetched.memory.text, "deploy server is at 192.168.0.50");
+        assert_eq!(fetched.memory.tags, vec!["infra".to_string()]);
+        assert_eq!(fetched.related.len(), 1);
+        assert_eq!(fetched.related[0].memory.id, b.id);
+        assert_eq!(fetched.related[0].direction, "out");
+
+        // reverse direction
+        let back = store.get_memory(&b.id).await.unwrap().unwrap();
+        assert_eq!(back.related[0].direction, "in");
+
+        // delete removes node + edges, leaves the other intact
+        assert!(store.delete_memory(&a.id).await.unwrap());
+        assert!(store.get_memory(&a.id).await.unwrap().is_none());
+        let b_after = store.get_memory(&b.id).await.unwrap().unwrap();
+        assert!(b_after.related.is_empty());
+
+        // deleting a missing memory is not an error, reports false
+        assert!(!store.delete_memory(&a.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn linking_a_missing_memory_fails_cleanly() {
+        let store = match uri() {
+            Some(_) => make_store().await,
+            None => return, // skipped: no NEO4J_TEST_URI
+        };
+        let a = store.store_memory("lonely", None).await.unwrap();
+        let result = store.link_memories(&a.id, "mem_does_not_exist", "RELATED_TO").await;
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("not found"), "unexpected error: {err}");
+        store.delete_memory(&a.id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn invalid_relation_name_is_rejected() {
+        let store = match uri() {
+            Some(_) => make_store().await,
+            None => return, // skipped: no NEO4J_TEST_URI
+        };
+        let a = store.store_memory("a", None).await.unwrap();
+        let b = store.store_memory("b", None).await.unwrap();
+        let result = store.link_memories(&a.id, &b.id, "HAS; SPACE").await;
+        assert!(result.is_err());
     }
 }
