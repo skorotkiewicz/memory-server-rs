@@ -40,7 +40,11 @@ impl MemoryService {
         }
     }
 
-    pub async fn store(&self, text: &str, tags: Option<Vec<String>>) -> anyhow::Result<MemoryRecord> {
+    pub async fn store(
+        &self,
+        text: &str,
+        tags: Option<Vec<String>>,
+    ) -> anyhow::Result<MemoryRecord> {
         // 1. graph first (source of truth)
         let record = self.graph.store_memory(text, tags).await?;
         // 2. then vector index (rebuildable)
@@ -55,7 +59,12 @@ impl MemoryService {
         Ok(record)
     }
 
-    pub async fn link(&self, from_id: &str, to_id: &str, relation: &str) -> anyhow::Result<crate::graph::LinkResult> {
+    pub async fn link(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        relation: &str,
+    ) -> anyhow::Result<crate::graph::LinkResult> {
         self.graph.link_memories(from_id, to_id, relation).await
     }
 
@@ -75,7 +84,11 @@ impl MemoryService {
 
     /// Semantic search: embed query → Qdrant top-k → hydrate from Neo4j.
     /// Skips orphaned vectors (missing in the graph) instead of failing.
-    pub async fn search(&self, query: &str, top_k: Option<usize>) -> anyhow::Result<Vec<SearchResult>> {
+    pub async fn search(
+        &self,
+        query: &str,
+        top_k: Option<usize>,
+    ) -> anyhow::Result<Vec<SearchResult>> {
         let top_k = top_k.unwrap_or(5);
         let result = self.embeddings.embed(query).await?;
         let hits = self.vectors.search(&result.vector, top_k).await?;
@@ -93,7 +106,11 @@ impl MemoryService {
 
     /// Relevant prior memories for a user message: semantic top-k with the
     /// graph neighborhood of each hit expanded (one hop).
-    pub async fn context(&self, message: &str, top_k: Option<usize>) -> anyhow::Result<Vec<ContextResult>> {
+    pub async fn context(
+        &self,
+        message: &str,
+        top_k: Option<usize>,
+    ) -> anyhow::Result<Vec<ContextResult>> {
         let hits = self.search(message, top_k.or(Some(3))).await?;
         let mut with_neighbors = Vec::new();
         for hit in hits {
@@ -152,9 +169,9 @@ impl MemoryService {
 mod tests {
     use super::*;
     use crate::embeddings::HashEmbeddings;
-    use std::sync::Arc;
     use crate::graph::InMemoryGraphStore;
     use crate::vectors::{InMemoryVectorStore, VectorRecord, VectorStore};
+    use std::sync::Arc;
 
     fn make_service() -> (MemoryService, Arc<InMemoryVectorStore>) {
         let vectors = Arc::new(InMemoryVectorStore::new());
@@ -195,7 +212,10 @@ mod tests {
         assert_eq!(hits[0].memory.id, a.id);
 
         // drift detection: index model matches current provider → empty drift
-        assert_eq!(service.embedding_model_drift().await.unwrap(), Vec::<String>::new());
+        assert_eq!(
+            service.embedding_model_drift().await.unwrap(),
+            Vec::<String>::new()
+        );
 
         // drift detection: foreign model in index → reported
         vectors

@@ -114,9 +114,7 @@ impl LocalEmbeddings {
         }
     }
 
-    async fn ensure_init(
-        &self,
-    ) -> anyhow::Result<Arc<std::sync::Mutex<fastembed::TextEmbedding>>> {
+    async fn ensure_init(&self) -> anyhow::Result<Arc<std::sync::Mutex<fastembed::TextEmbedding>>> {
         self.embedder
             .get_or_try_init(|| async {
                 let cache_dir = self.cache_dir.clone();
@@ -239,14 +237,16 @@ pub fn create_embedding_provider(config: &EmbeddingsConfig) -> Box<dyn Embedding
 }
 
 fn local_cache_path() -> Option<PathBuf> {
-    std::env::var("FASTEMBED_CACHE_PATH").ok().map(PathBuf::from)
+    std::env::var("FASTEMBED_CACHE_PATH")
+        .ok()
+        .map(PathBuf::from)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use axum::routing::post;
     use axum::Json;
+    use axum::routing::post;
     use std::sync::Arc as StdArc;
     use tokio::sync::oneshot;
 
@@ -261,18 +261,20 @@ mod tests {
 
         let app = axum::Router::new().route(
             "/embeddings",
-            post(move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
-                let capture = StdArc::clone(&capture);
-                async move {
-                    let _ = capture.lock().unwrap().take().unwrap().send(Captured {
-                        auth: headers
-                            .get(axum::http::header::AUTHORIZATION)
-                            .and_then(|v| v.to_str().ok().map(String::from)),
-                        body,
-                    });
-                    axum::Json(serde_json::json!({ "data": [{ "embedding": [0.1, 0.2] }] }))
-                }
-            }),
+            post(
+                move |headers: axum::http::HeaderMap, Json(body): Json<serde_json::Value>| {
+                    let capture = StdArc::clone(&capture);
+                    async move {
+                        let _ = capture.lock().unwrap().take().unwrap().send(Captured {
+                            auth: headers
+                                .get(axum::http::header::AUTHORIZATION)
+                                .and_then(|v| v.to_str().ok().map(String::from)),
+                            body,
+                        });
+                        axum::Json(serde_json::json!({ "data": [{ "embedding": [0.1, 0.2] }] }))
+                    }
+                },
+            ),
         );
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

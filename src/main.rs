@@ -18,10 +18,10 @@ mod server;
 mod service;
 mod vectors;
 
-use embeddings::{create_embedding_provider, EmbeddingsConfig, EmbeddingsProviderKind};
+use embeddings::{EmbeddingsConfig, EmbeddingsProviderKind, create_embedding_provider};
 use graph::{GraphStore, Neo4jGraphStore};
+use server::{MemoryServerHandle, MemoryServerOptions};
 use service::MemoryService;
-use server::{MemoryServerOptions, MemoryServerHandle};
 use std::sync::Arc;
 use vectors::QdrantVectorStore;
 
@@ -89,7 +89,7 @@ async fn build_service() -> anyhow::Result<Arc<MemoryService>> {
 async fn sigterm() {
     #[cfg(unix)]
     {
-        use tokio::signal::unix::{signal, SignalKind};
+        use tokio::signal::unix::{SignalKind, signal};
         match signal(SignalKind::terminate()) {
             Ok(mut sig) => {
                 sig.recv().await;

@@ -14,7 +14,7 @@ use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 
 pub const SERVER_NAME: &str = "cognitive-memory";
@@ -169,7 +169,11 @@ async fn handle_rpc_message(state: &AppState, message: &Value) -> Option<Value> 
         "ping" => Some(json_rpc_result(id, json!({}))),
         "tools/list" => Some(json_rpc_result(id, json!({ "tools": tools_list() }))),
         "tools/call" => Some(handle_tools_call(state, id, &params).await),
-        other => Some(json_rpc_error(id, -32601, &format!("Method not found: {other}"))),
+        other => Some(json_rpc_error(
+            id,
+            -32601,
+            &format!("Method not found: {other}"),
+        )),
     }
 }
 
@@ -201,7 +205,10 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                         return json_rpc_error(
                             id,
                             -32602,
-                            &format!("Invalid arguments: '{}' must be an integer between 1 and {}", $key, $max),
+                            &format!(
+                                "Invalid arguments: '{}' must be an integer between 1 and {}",
+                                $key, $max
+                            ),
                         )
                     }
                 },
@@ -212,15 +219,17 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
     let outcome: Result<Value, String> = match name {
         "memory_store" => {
             let text = arg!("text");
-            let tags = args
-                .get("tags")
-                .and_then(|t| t.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|t| t.as_str().map(String::from))
-                        .collect::<Vec<String>>()
-                });
-            state.service.store(&text, tags).await.map_err(|e| format!("{e:#}")).map(|record| text_content(serde_json::to_value(record).unwrap_or_default()))
+            let tags = args.get("tags").and_then(|t| t.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|t| t.as_str().map(String::from))
+                    .collect::<Vec<String>>()
+            });
+            state
+                .service
+                .store(&text, tags)
+                .await
+                .map_err(|e| format!("{e:#}"))
+                .map(|record| text_content(serde_json::to_value(record).unwrap_or_default()))
         }
         "memory_search" => {
             let query = arg!("query");
@@ -230,9 +239,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 .search(&query, top_k)
                 .await
                 .map_err(|e| format!("{e:#}"))
-                .and_then(|results| {
-                    serde_json::to_value(results).map_err(|e| format!("{e}"))
-                })
+                .and_then(|results| serde_json::to_value(results).map_err(|e| format!("{e}")))
                 .map(text_content)
         }
         "memory_get" => {
@@ -241,7 +248,10 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 Ok(Some(memory)) => Ok(text_content(
                     serde_json::to_value(memory).unwrap_or_default(),
                 )),
-                Ok(None) => Ok(text_content_raw(&format!("memory \"{}\" not found", memory_id))),
+                Ok(None) => Ok(text_content_raw(&format!(
+                    "memory \"{}\" not found",
+                    memory_id
+                ))),
                 Err(e) => Err(format!("{e:#}")),
             }
         }
@@ -249,15 +259,21 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
             let from_id = arg!("from_id");
             let to_id = arg!("to_id");
             let relation = arg!("relation");
-            state.service.link(&from_id, &to_id, &relation).await.map_err(|e| format!("{e:#}")).map(|link| {
-                text_content(serde_json::to_value(link).unwrap_or_default())
-            })
+            state
+                .service
+                .link(&from_id, &to_id, &relation)
+                .await
+                .map_err(|e| format!("{e:#}"))
+                .map(|link| text_content(serde_json::to_value(link).unwrap_or_default()))
         }
         "memory_delete" => {
             let memory_id = arg!("id");
             match state.service.delete(&memory_id).await {
                 Ok(true) => Ok(text_content_raw(&format!("deleted {}", memory_id))),
-                Ok(false) => Ok(text_content_raw(&format!("memory \"{}\" not found", memory_id))),
+                Ok(false) => Ok(text_content_raw(&format!(
+                    "memory \"{}\" not found",
+                    memory_id
+                ))),
                 Err(e) => Err(format!("{e:#}")),
             }
         }
@@ -269,9 +285,7 @@ async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value
                 .context(&message, top_k)
                 .await
                 .map_err(|e| format!("{e:#}"))
-                .and_then(|results| {
-                    serde_json::to_value(results).map_err(|e| format!("{e}"))
-                })
+                .and_then(|results| serde_json::to_value(results).map_err(|e| format!("{e}")))
                 .map(text_content)
         }
         other => {
@@ -293,11 +307,7 @@ fn json_response(status: StatusCode, value: Value) -> Response {
 }
 
 fn error_json(status: StatusCode, message: &str) -> Response {
-    (
-        status,
-        Json(json!({ "error": message })),
-    )
-        .into_response()
+    (status, Json(json!({ "error": message }))).into_response()
 }
 
 async fn health() -> Response {
@@ -306,7 +316,13 @@ async fn health() -> Response {
 
 /// Handles everything that is not GET /health. Stateless MCP transport:
 /// POST (any path) carries JSON-RPC; everything else is rejected.
-async fn fallback(State(state): State<AppState>, method: Method, uri: Uri, headers: HeaderMap, body: Body) -> Response {
+async fn fallback(
+    State(state): State<AppState>,
+    method: Method,
+    uri: Uri,
+    headers: HeaderMap,
+    body: Body,
+) -> Response {
     match method {
         Method::POST => handle_mcp_post(state, headers, body).await,
         Method::GET | Method::DELETE => error_json(
@@ -648,7 +664,10 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(response["result"]["content"][0]["text"], format!("deleted {id}"));
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            format!("deleted {id}")
+        );
 
         // delete again → not found
         let (_, response) = rpc(
@@ -684,8 +703,10 @@ mod tests {
         };
         let (_, r1) = store("rust rewrite done", 1).await;
         let (_, r2) = store("fastembed ported to rust", 2).await;
-        let a: Value = serde_json::from_str(r1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
-        let b: Value = serde_json::from_str(r2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let a: Value =
+            serde_json::from_str(r1["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        let b: Value =
+            serde_json::from_str(r2["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
 
         let (_, response) = rpc(
             server.port,
@@ -793,7 +814,12 @@ mod tests {
         assert_eq!(response.status(), 401);
 
         // client with the token works
-        let (status, response) = rpc(secured.port, json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }), Some("s3cret")).await;
+        let (status, response) = rpc(
+            secured.port,
+            json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }),
+            Some("s3cret"),
+        )
+        .await;
         assert_eq!(status, StatusCode::OK);
         assert!(!response["result"]["tools"].as_array().unwrap().is_empty());
 

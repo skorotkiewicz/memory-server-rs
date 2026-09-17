@@ -65,8 +65,17 @@ fn valid_relation(relation: &str) -> bool {
 #[async_trait]
 pub trait GraphStore: Send + Sync {
     async fn init(&self) -> anyhow::Result<()>;
-    async fn store_memory(&self, text: &str, tags: Option<Vec<String>>) -> anyhow::Result<MemoryRecord>;
-    async fn link_memories(&self, from_id: &str, to_id: &str, relation: &str) -> anyhow::Result<LinkResult>;
+    async fn store_memory(
+        &self,
+        text: &str,
+        tags: Option<Vec<String>>,
+    ) -> anyhow::Result<MemoryRecord>;
+    async fn link_memories(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        relation: &str,
+    ) -> anyhow::Result<LinkResult>;
     async fn get_memory(&self, id: &str) -> anyhow::Result<Option<MemoryWithRelated>>;
     async fn delete_memory(&self, id: &str) -> anyhow::Result<bool>;
     async fn list_all(&self) -> anyhow::Result<Vec<MemoryRecord>>;
@@ -111,7 +120,11 @@ impl Neo4jGraphStore {
             out.push(RelatedMemory {
                 memory: MemoryRecord {
                     id,
-                    text: map.get::<Option<String>>("text").ok().flatten().unwrap_or_default(),
+                    text: map
+                        .get::<Option<String>>("text")
+                        .ok()
+                        .flatten()
+                        .unwrap_or_default(),
                     created_at: map
                         .get::<Option<String>>("createdAt")
                         .ok()
@@ -152,7 +165,11 @@ impl GraphStore for Neo4jGraphStore {
         Ok(())
     }
 
-    async fn store_memory(&self, text: &str, tags: Option<Vec<String>>) -> anyhow::Result<MemoryRecord> {
+    async fn store_memory(
+        &self,
+        text: &str,
+        tags: Option<Vec<String>>,
+    ) -> anyhow::Result<MemoryRecord> {
         let record = MemoryRecord {
             id: new_id(),
             text: text.to_string(),
@@ -171,7 +188,12 @@ impl GraphStore for Neo4jGraphStore {
         Ok(record)
     }
 
-    async fn link_memories(&self, from_id: &str, to_id: &str, relation: &str) -> anyhow::Result<LinkResult> {
+    async fn link_memories(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        relation: &str,
+    ) -> anyhow::Result<LinkResult> {
         if !valid_relation(relation) {
             anyhow::bail!("invalid relation name: {}", relation)
         }
@@ -298,7 +320,11 @@ impl GraphStore for InMemoryGraphStore {
         Ok(())
     }
 
-    async fn store_memory(&self, text: &str, tags: Option<Vec<String>>) -> anyhow::Result<MemoryRecord> {
+    async fn store_memory(
+        &self,
+        text: &str,
+        tags: Option<Vec<String>>,
+    ) -> anyhow::Result<MemoryRecord> {
         let record = MemoryRecord {
             id: new_id(),
             text: text.to_string(),
@@ -309,12 +335,21 @@ impl GraphStore for InMemoryGraphStore {
         Ok(record)
     }
 
-    async fn link_memories(&self, from_id: &str, to_id: &str, relation: &str) -> anyhow::Result<LinkResult> {
+    async fn link_memories(
+        &self,
+        from_id: &str,
+        to_id: &str,
+        relation: &str,
+    ) -> anyhow::Result<LinkResult> {
         let mut inner = self.inner.lock().await;
         if !inner.memories.iter().any(|m| m.id == from_id)
             || !inner.memories.iter().any(|m| m.id == to_id)
         {
-            anyhow::bail!("cannot link: memory \"{}\" or \"{}\" not found", from_id, to_id)
+            anyhow::bail!(
+                "cannot link: memory \"{}\" or \"{}\" not found",
+                from_id,
+                to_id
+            )
         }
         inner
             .edges
@@ -363,9 +398,7 @@ impl GraphStore for InMemoryGraphStore {
         let before = inner.memories.len();
         inner.memories.retain(|m| m.id != id);
         let deleted = inner.memories.len() < before;
-        inner
-            .edges
-            .retain(|(from, to, _)| from != id && to != id);
+        inner.edges.retain(|(from, to, _)| from != id && to != id);
         Ok(deleted)
     }
 
@@ -386,7 +419,9 @@ mod tests {
     // Skipped unless NEO4J_TEST_URI is set (e.g. point it at a throwaway
     // container: docker run -p 127.0.0.1:7687:7687 -e NEO4J_AUTH=neo4j/testpassword neo4j:5-community)
     fn uri() -> Option<String> {
-        std::env::var("NEO4J_TEST_URI").ok().filter(|u| !u.is_empty())
+        std::env::var("NEO4J_TEST_URI")
+            .ok()
+            .filter(|u| !u.is_empty())
     }
 
     async fn make_store() -> Neo4jGraphStore {
@@ -408,7 +443,10 @@ mod tests {
             None => return, // skipped: no NEO4J_TEST_URI
         };
         let a = store
-            .store_memory("deploy server is at 192.168.0.50", Some(vec!["infra".to_string()]))
+            .store_memory(
+                "deploy server is at 192.168.0.50",
+                Some(vec!["infra".to_string()]),
+            )
             .await
             .unwrap();
         let b = store
@@ -420,7 +458,10 @@ mod tests {
         assert_ne!(b.id, a.id);
 
         // link
-        let link = store.link_memories(&a.id, &b.id, "RELATED_TO").await.unwrap();
+        let link = store
+            .link_memories(&a.id, &b.id, "RELATED_TO")
+            .await
+            .unwrap();
         assert_eq!(link.relation, "RELATED_TO");
 
         // fetch with graph neighborhood
@@ -453,7 +494,9 @@ mod tests {
             None => return, // skipped: no NEO4J_TEST_URI
         };
         let a = store.store_memory("lonely", None).await.unwrap();
-        let result = store.link_memories(&a.id, "mem_does_not_exist", "RELATED_TO").await;
+        let result = store
+            .link_memories(&a.id, "mem_does_not_exist", "RELATED_TO")
+            .await;
         let err = format!("{:#}", result.unwrap_err());
         assert!(err.contains("not found"), "unexpected error: {err}");
         store.delete_memory(&a.id).await.unwrap();

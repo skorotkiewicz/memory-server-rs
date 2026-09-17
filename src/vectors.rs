@@ -4,8 +4,8 @@
 use async_trait::async_trait;
 use md5::{Digest, Md5};
 use qdrant_client::qdrant::{
-    CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter, PointId,
-    PointStruct, PointsIdsList, QueryPointsBuilder, ScrollPointsBuilder, UpsertPointsBuilder,
+    CreateCollectionBuilder, DeletePointsBuilder, Distance, Filter, PointId, PointStruct,
+    PointsIdsList, QueryPointsBuilder, ScrollPointsBuilder, UpsertPointsBuilder,
     VectorParamsBuilder,
 };
 use qdrant_client::{Payload, Qdrant};
@@ -81,7 +81,11 @@ pub struct QdrantVectorStore {
 }
 
 impl QdrantVectorStore {
-    pub fn new(url: &str, api_key: Option<String>, dimensions: Option<u32>) -> anyhow::Result<Self> {
+    pub fn new(
+        url: &str,
+        api_key: Option<String>,
+        dimensions: Option<u32>,
+    ) -> anyhow::Result<Self> {
         let mut builder = Qdrant::from_url(url);
         if let Some(key) = api_key {
             builder = builder.api_key(key);
@@ -194,9 +198,7 @@ impl VectorStore for QdrantVectorStore {
     async fn delete_all(&self) -> anyhow::Result<()> {
         // empty filter matches every point
         self.client
-            .delete_points(
-                DeletePointsBuilder::new(COLLECTION_NAME).points(Filter::default()),
-            )
+            .delete_points(DeletePointsBuilder::new(COLLECTION_NAME).points(Filter::default()))
             .await?;
         Ok(())
     }
@@ -287,13 +289,20 @@ impl VectorStore for InMemoryVectorStore {
                 score: cosine_similarity(vector, &rec.vector),
             })
             .collect();
-        hits.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
         hits.truncate(top_k);
         Ok(hits)
     }
 
     async fn delete(&self, memory_id: &str) -> anyhow::Result<()> {
-        self.points.lock().unwrap().retain(|p| p.memory_id != memory_id);
+        self.points
+            .lock()
+            .unwrap()
+            .retain(|p| p.memory_id != memory_id);
         Ok(())
     }
 
@@ -349,10 +358,7 @@ mod tests {
         #[test]
         fn strips_mem_prefix_deterministically() {
             let id = "mem_123e4567-e89b-42d3-a456-426614174000";
-            assert_eq!(
-                uuid_to_ulid(id),
-                "123e4567-e89b-42d3-a456-426614174000"
-            );
+            assert_eq!(uuid_to_ulid(id), "123e4567-e89b-42d3-a456-426614174000");
             assert_eq!(uuid_to_ulid(id), uuid_to_ulid(id));
         }
 
@@ -371,7 +377,9 @@ mod tests {
         use super::*;
 
         fn url() -> Option<String> {
-            std::env::var("QDRANT_TEST_URL").ok().filter(|u| !u.is_empty())
+            std::env::var("QDRANT_TEST_URL")
+                .ok()
+                .filter(|u| !u.is_empty())
         }
 
         /// serialize integration tests — they share one scratch collection
