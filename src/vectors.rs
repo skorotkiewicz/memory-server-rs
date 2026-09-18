@@ -113,10 +113,9 @@ impl QdrantVectorStore {
                         .vectors_config(VectorParamsBuilder::new(dims as u64, Distance::Cosine)),
                 )
                 .await
+                && !e.to_string().contains("already exists")
             {
-                if !e.to_string().contains("already exists") {
-                    return Err(e.into());
-                }
+                return Err(e.into());
             }
         }
         *self.collection_ready.lock().unwrap() = true;
@@ -145,10 +144,9 @@ impl VectorStore for QdrantVectorStore {
                         .vectors_config(VectorParamsBuilder::new(dims as u64, Distance::Cosine)),
                 )
                 .await
+                && !e.to_string().contains("already exists")
             {
-                if !e.to_string().contains("already exists") {
-                    return Err(e.into());
-                }
+                return Err(e.into());
             }
         }
         *self.collection_ready.lock().unwrap() = true;

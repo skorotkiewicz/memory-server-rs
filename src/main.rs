@@ -78,6 +78,13 @@ async fn build_service() -> anyhow::Result<Arc<MemoryService>> {
         model: env_nonempty("EMBEDDINGS_MODEL"),
     };
     let embeddings = create_embedding_provider(&config);
+    // fail fast at startup: download/load the local model now instead of on
+    // the first memory call. Provider-specific: no-op for the
+    // openai-compatible provider (nothing to download), downloads for local.
+    embeddings
+        .warm_up()
+        .await
+        .map_err(|e| anyhow::anyhow!("embedding model warm-up failed: {e:#}"))?;
 
     Ok(Arc::new(MemoryService::new(
         Arc::new(graph),

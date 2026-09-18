@@ -21,6 +21,11 @@ pub trait EmbeddingProvider: Send + Sync {
     async fn embed(&self, text: &str) -> anyhow::Result<EmbeddingResult>;
     /// model identifier recorded alongside vectors
     fn model(&self) -> String;
+    /// eagerly initialize (e.g. download the local model) — no-op by default;
+    /// called at startup so the first embed() doesn't pay the cost
+    async fn warm_up(&self) -> anyhow::Result<()> {
+        Ok(())
+    }
 }
 
 /// OpenAI-compatible /embeddings endpoint (user-configured).
@@ -138,6 +143,13 @@ impl LocalEmbeddings {
 
 #[async_trait]
 impl EmbeddingProvider for LocalEmbeddings {
+    async fn warm_up(&self) -> anyhow::Result<()> {
+        eprintln!("warming up local embedding model (first run downloads ~130MB)...");
+        self.ensure_init().await?;
+        eprintln!("local embedding model ready");
+        Ok(())
+    }
+
     async fn embed(&self, text: &str) -> anyhow::Result<EmbeddingResult> {
         let embedder = self.ensure_init().await?;
         let text = text.to_string();
