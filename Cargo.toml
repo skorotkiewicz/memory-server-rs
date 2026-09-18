@@ -12,8 +12,9 @@ fastembed = "7.0.1"
 md-5 = "0.10"
 neo4rs = "0.8"
 qdrant-client = "1.19"
+tokio-util = "0.7"
 reqwest = { version = "0.12", features = ["json"] }
-rmcp = { version = "3.4.0", features = ["server"] }
+rmcp = { version = "3.4.0", features = ["server", "transport-streamable-http-server", "schemars"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "time"] }

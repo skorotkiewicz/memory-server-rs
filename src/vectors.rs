@@ -104,12 +104,20 @@ impl QdrantVectorStore {
             return Ok(());
         }
         if !self.collection_exists().await? {
-            self.client
+            // tolerate a concurrent create (two first-use requests racing):
+            // "already exists" means we're done
+            if let Err(e) = self
+                .client
                 .create_collection(
                     CreateCollectionBuilder::new(COLLECTION_NAME)
                         .vectors_config(VectorParamsBuilder::new(dims as u64, Distance::Cosine)),
                 )
-                .await?;
+                .await
+            {
+                if !e.to_string().contains("already exists") {
+                    return Err(e.into());
+                }
+            }
         }
         *self.collection_ready.lock().unwrap() = true;
         Ok(())
@@ -130,12 +138,18 @@ impl VectorStore for QdrantVectorStore {
                      (embed one memory first or set embeddings.dimensions in config)"
                 )
             })?;
-            self.client
+            if let Err(e) = self
+                .client
                 .create_collection(
                     CreateCollectionBuilder::new(COLLECTION_NAME)
                         .vectors_config(VectorParamsBuilder::new(dims as u64, Distance::Cosine)),
                 )
-                .await?;
+                .await
+            {
+                if !e.to_string().contains("already exists") {
+                    return Err(e.into());
+                }
+            }
         }
         *self.collection_ready.lock().unwrap() = true;
         Ok(())

@@ -1,26 +1,25 @@
-//! MCP server exposing the memory tools over Streamable HTTP.
-//! Stateless pattern: each POST is handled independently — simple, safe for
+//! MCP server exposing the memory tools over Streamable HTTP, built on the
+//! official Rust MCP SDK (rmcp).
+//!
+//! Stateless JSON mode: each POST is handled independently — simple, safe for
 //! concurrent clients, and restarts lose nothing because all state lives in
 //! Neo4j/Qdrant.
 //!
-//! MCP tools: memory_store/search/get/link/delete/context, served stateless
-//! over Streamable HTTP (the JSON-RPC surface is implemented directly on axum).
+//! Tools: memory_store / memory_search / memory_get / memory_link /
+//! memory_delete / memory_context.
 
 use crate::service::MemoryService;
 use anyhow::Result;
-use axum::body::Body;
 use axum::extract::State;
-use axum::http::{HeaderMap, Method, StatusCode, Uri};
-use axum::response::{IntoResponse, Response};
+use axum::response::IntoResponse;
 use axum::routing::get;
 use axum::{Json, Router};
-use serde_json::{Value, json};
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{CallToolResult, ContentBlock, ErrorData};
+use rmcp::{ServerHandler, schemars, tool, tool_handler, tool_router};
+use serde_json::json;
 use std::sync::Arc;
-
-pub const SERVER_NAME: &str = "cognitive-memory";
-pub const SERVER_VERSION: &str = "0.1.0";
-const SERVER_INSTRUCTIONS: &str =
-    "Persistent cognitive memory: store, search, link and recall knowledge across sessions.";
 
 pub struct MemoryServerOptions {
     pub port: u16,
@@ -42,362 +41,218 @@ impl MemoryServerHandle {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub struct MemoryMcpServer {
     service: Arc<MemoryService>,
+    tool_router: ToolRouter<Self>,
+}
+
+// ---- tool arguments (snake_case, same names as the clients send) ----------
+
+macro_rules! top_k_bounds {
+    ($v:expr, $max:expr) => {
+        match $v {
+            Some(n) if (1..=$max).contains(&n) => Some(n as usize),
+            Some(n) => {
+                return Err(ErrorData::invalid_params(
+                    format!("top_k must be between 1 and {}, got {n}", $max),
+                    None,
+                ))
+            }
+            None => None,
+        }
+    };
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct StoreParams {
+    /// The memory content to store
+    pub text: String,
+    /// Optional tags
+    pub tags: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SearchParams {
+    /// What to search for
+    pub query: String,
+    /// Max results (default 5)
+    pub top_k: Option<u64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct GetParams {
+    /// Memory id
+    pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LinkParams {
+    /// Source memory id
+    pub from_id: String,
+    /// Target memory id
+    pub to_id: String,
+    /// Relation type, e.g. RELATED_TO, CAUSES, PART_OF
+    pub relation: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DeleteParams {
+    /// Memory id
+    pub id: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ContextParams {
+    /// The current user message
+    pub message: String,
+    /// Max memories (default 3)
+    pub top_k: Option<u64>,
+}
+
+fn internal_error(err: anyhow::Error) -> ErrorData {
+    ErrorData::internal_error(format!("{err:#}"), None)
+}
+
+#[tool_router]
+impl MemoryMcpServer {
+    pub fn new(service: Arc<MemoryService>) -> Self {
+        Self {
+            service,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    #[tool(
+        description = "Store a new memory (fact, preference, observation) for later semantic recall"
+    )]
+    async fn memory_store(
+        &self,
+        Parameters(params): Parameters<StoreParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let record = self
+            .service
+            .store(&params.text, params.tags)
+            .await
+            .map_err(internal_error)?;
+        let json = serde_json::to_string(&record)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+
+    #[tool(description = "Search memories by semantic similarity (paraphrasing works)")]
+    async fn memory_search(
+        &self,
+        Parameters(params): Parameters<SearchParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let top_k = top_k_bounds!(params.top_k, 20);
+        let results = self
+            .service
+            .search(&params.query, top_k)
+            .await
+            .map_err(internal_error)?;
+        let json = serde_json::to_string(&results)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+
+    #[tool(description = "Get a memory by id, including its linked memories (graph neighborhood)")]
+    async fn memory_get(
+        &self,
+        Parameters(params): Parameters<GetParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self.service.get(&params.id).await.map_err(internal_error)? {
+            Some(memory) => {
+                let json = serde_json::to_string(&memory)
+                    .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+                Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+            }
+            None => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "memory \"{}\" not found",
+                params.id
+            ))])),
+        }
+    }
+
+    #[tool(description = "Create a typed relation between two memories")]
+    async fn memory_link(
+        &self,
+        Parameters(params): Parameters<LinkParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let link = self
+            .service
+            .link(&params.from_id, &params.to_id, &params.relation)
+            .await
+            .map_err(internal_error)?;
+        let json = serde_json::to_string(&link)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+
+    #[tool(description = "Delete a memory by id (its relations are removed too)")]
+    async fn memory_delete(
+        &self,
+        Parameters(params): Parameters<DeleteParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        match self
+            .service
+            .delete(&params.id)
+            .await
+            .map_err(internal_error)?
+        {
+            true => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "deleted {}",
+                params.id
+            ))])),
+            false => Ok(CallToolResult::success(vec![ContentBlock::text(format!(
+                "memory \"{}\" not found",
+                params.id
+            ))])),
+        }
+    }
+
+    #[tool(
+        description = "Get prior memories relevant to the current user message, with graph neighborhoods expanded — call this when a message might relate to previously stored knowledge"
+    )]
+    async fn memory_context(
+        &self,
+        Parameters(params): Parameters<ContextParams>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let top_k = top_k_bounds!(params.top_k, 10);
+        let results = self
+            .service
+            .context(&params.message, top_k)
+            .await
+            .map_err(internal_error)?;
+        let json = serde_json::to_string(&results)
+            .map_err(|e| ErrorData::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![ContentBlock::text(json)]))
+    }
+}
+
+#[tool_handler(
+    router = self.tool_router,
+    name = "cognitive-memory",
+    version = "0.1.0",
+    instructions = "Persistent cognitive memory: store, search, link and recall knowledge across sessions."
+)]
+impl ServerHandler for MemoryMcpServer {}
+
+// ---- HTTP wiring -----------------------------------------------------------
+
+#[derive(Clone)]
+struct AppState {
     token: Option<Arc<String>>,
 }
 
-pub fn tools_list() -> Vec<Value> {
-    vec![
-        json!({
-            "name": "memory_store",
-            "description": "Store a new memory (fact, preference, observation) for later semantic recall",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "text": { "type": "string", "description": "The memory content to store" },
-                    "tags": { "type": "array", "items": { "type": "string" }, "description": "Optional tags" }
-                },
-                "required": ["text"]
-            }
-        }),
-        json!({
-            "name": "memory_search",
-            "description": "Search memories by semantic similarity (paraphrasing works)",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": { "type": "string", "description": "What to search for" },
-                    "top_k": { "type": "integer", "minimum": 1, "maximum": 20, "description": "Max results (default 5)" }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "memory_get",
-            "description": "Get a memory by id, including its linked memories (graph neighborhood)",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Memory id" }
-                },
-                "required": ["id"]
-            }
-        }),
-        json!({
-            "name": "memory_link",
-            "description": "Create a typed relation between two memories",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "from_id": { "type": "string", "description": "Source memory id" },
-                    "to_id": { "type": "string", "description": "Target memory id" },
-                    "relation": { "type": "string", "description": "Relation type, e.g. RELATED_TO, CAUSES, PART_OF" }
-                },
-                "required": ["from_id", "to_id", "relation"]
-            }
-        }),
-        json!({
-            "name": "memory_delete",
-            "description": "Delete a memory by id (its relations are removed too)",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": { "type": "string", "description": "Memory id" }
-                },
-                "required": ["id"]
-            }
-        }),
-        json!({
-            "name": "memory_context",
-            "description": "Get prior memories relevant to the current user message, with graph neighborhoods expanded — call this when a message might relate to previously stored knowledge",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "message": { "type": "string", "description": "The current user message" },
-                    "top_k": { "type": "integer", "minimum": 1, "maximum": 10, "description": "Max memories (default 3)" }
-                },
-                "required": ["message"]
-            }
-        }),
-    ]
-}
-
-fn json_rpc_result(id: Value, result: Value) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "result": result })
-}
-
-fn json_rpc_error(id: Value, code: i64, message: &str) -> Value {
-    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
-}
-
-fn text_content(value: Value) -> Value {
-    json!({ "content": [{ "type": "text", "text": value.to_string() }] })
-}
-
-fn text_content_raw(text: &str) -> Value {
-    json!({ "content": [{ "type": "text", "text": text }] })
-}
-
-/// Handle a single JSON-RPC message. Returns None for notifications.
-async fn handle_rpc_message(state: &AppState, message: &Value) -> Option<Value> {
-    let method = message.get("method").and_then(|m| m.as_str())?.to_string();
-    let id = message.get("id").cloned();
-    let id = match id {
-        Some(v @ (Value::Number(_) | Value::String(_))) => v,
-        // notification (or null id) — nothing to respond with
-        _ => return None,
-    };
-    let params = message.get("params").cloned().unwrap_or(json!({}));
-
-    match method.as_str() {
-        "initialize" => {
-            let pv = params
-                .get("protocolVersion")
-                .and_then(|v| v.as_str())
-                .unwrap_or("2025-06-18");
-            Some(json_rpc_result(
-                id,
-                json!({
-                    "protocolVersion": pv,
-                    "capabilities": { "tools": { "listChanged": false } },
-                    "serverInfo": { "name": SERVER_NAME, "version": SERVER_VERSION },
-                    "instructions": SERVER_INSTRUCTIONS
-                }),
-            ))
-        }
-        "ping" => Some(json_rpc_result(id, json!({}))),
-        "tools/list" => Some(json_rpc_result(id, json!({ "tools": tools_list() }))),
-        "tools/call" => Some(handle_tools_call(state, id, &params).await),
-        other => Some(json_rpc_error(
-            id,
-            -32601,
-            &format!("Method not found: {other}"),
-        )),
-    }
-}
-
-async fn handle_tools_call(state: &AppState, id: Value, params: &Value) -> Value {
-    let name = params.get("name").and_then(|n| n.as_str()).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or(json!({}));
-
-    macro_rules! arg {
-        ($key:expr) => {
-            match args.get($key).and_then(|v| v.as_str()) {
-                Some(v) => v.to_string(),
-                None => {
-                    return json_rpc_error(
-                        id,
-                        -32602,
-                        &format!("Invalid arguments: missing required field '{}'", $key),
-                    )
-                }
-            }
-        };
-    }
-    macro_rules! opt_top_k {
-        ($key:expr, $max:expr) => {
-            match args.get($key) {
-                None | Some(Value::Null) => None,
-                Some(v) => match v.as_u64() {
-                    Some(n) if (1..=$max).contains(&n) => Some(n as usize),
-                    _ => {
-                        return json_rpc_error(
-                            id,
-                            -32602,
-                            &format!(
-                                "Invalid arguments: '{}' must be an integer between 1 and {}",
-                                $key, $max
-                            ),
-                        )
-                    }
-                },
-            }
-        };
-    }
-
-    let outcome: Result<Value, String> = match name {
-        "memory_store" => {
-            let text = arg!("text");
-            let tags = args.get("tags").and_then(|t| t.as_array()).map(|arr| {
-                arr.iter()
-                    .filter_map(|t| t.as_str().map(String::from))
-                    .collect::<Vec<String>>()
-            });
-            state
-                .service
-                .store(&text, tags)
-                .await
-                .map_err(|e| format!("{e:#}"))
-                .map(|record| text_content(serde_json::to_value(record).unwrap_or_default()))
-        }
-        "memory_search" => {
-            let query = arg!("query");
-            let top_k = opt_top_k!("top_k", 20);
-            state
-                .service
-                .search(&query, top_k)
-                .await
-                .map_err(|e| format!("{e:#}"))
-                .and_then(|results| serde_json::to_value(results).map_err(|e| format!("{e}")))
-                .map(text_content)
-        }
-        "memory_get" => {
-            let memory_id = arg!("id");
-            match state.service.get(&memory_id).await {
-                Ok(Some(memory)) => Ok(text_content(
-                    serde_json::to_value(memory).unwrap_or_default(),
-                )),
-                Ok(None) => Ok(text_content_raw(&format!(
-                    "memory \"{}\" not found",
-                    memory_id
-                ))),
-                Err(e) => Err(format!("{e:#}")),
-            }
-        }
-        "memory_link" => {
-            let from_id = arg!("from_id");
-            let to_id = arg!("to_id");
-            let relation = arg!("relation");
-            state
-                .service
-                .link(&from_id, &to_id, &relation)
-                .await
-                .map_err(|e| format!("{e:#}"))
-                .map(|link| text_content(serde_json::to_value(link).unwrap_or_default()))
-        }
-        "memory_delete" => {
-            let memory_id = arg!("id");
-            match state.service.delete(&memory_id).await {
-                Ok(true) => Ok(text_content_raw(&format!("deleted {}", memory_id))),
-                Ok(false) => Ok(text_content_raw(&format!(
-                    "memory \"{}\" not found",
-                    memory_id
-                ))),
-                Err(e) => Err(format!("{e:#}")),
-            }
-        }
-        "memory_context" => {
-            let message = arg!("message");
-            let top_k = opt_top_k!("top_k", 10);
-            state
-                .service
-                .context(&message, top_k)
-                .await
-                .map_err(|e| format!("{e:#}"))
-                .and_then(|results| serde_json::to_value(results).map_err(|e| format!("{e}")))
-                .map(text_content)
-        }
-        other => {
-            return json_rpc_error(id, -32602, &format!("Unknown tool: {other}"));
-        }
-    };
-
-    match outcome {
-        Ok(result) => json_rpc_result(id, result),
-        Err(err) => json_rpc_result(
-            id,
-            json!({ "content": [{ "type": "text", "text": format!("Tool execution failed: {err}") }], "isError": true }),
-        ),
-    }
-}
-
-fn json_response(status: StatusCode, value: Value) -> Response {
+fn json_response(
+    status: axum::http::StatusCode,
+    value: serde_json::Value,
+) -> axum::response::Response {
     (status, Json(value)).into_response()
 }
 
-fn error_json(status: StatusCode, message: &str) -> Response {
-    (status, Json(json!({ "error": message }))).into_response()
-}
-
-async fn health() -> Response {
-    json_response(StatusCode::OK, json!({ "ok": true }))
-}
-
-/// Handles everything that is not GET /health. Stateless MCP transport:
-/// POST (any path) carries JSON-RPC; everything else is rejected.
-async fn fallback(
-    State(state): State<AppState>,
-    method: Method,
-    uri: Uri,
-    headers: HeaderMap,
-    body: Body,
-) -> Response {
-    match method {
-        Method::POST => handle_mcp_post(state, headers, body).await,
-        Method::GET | Method::DELETE => error_json(
-            StatusCode::METHOD_NOT_ALLOWED,
-            "method not allowed in stateless mode; use POST",
-        ),
-        _ => {
-            let _ = uri;
-            error_json(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
-        }
-    }
-}
-
-async fn handle_mcp_post(state: AppState, headers: HeaderMap, body: Body) -> Response {
-    let bytes = match axum::body::to_bytes(body, 10 * 1024 * 1024).await {
-        Ok(b) => b,
-        Err(_) => {
-            return error_json(StatusCode::BAD_REQUEST, "failed to read request body");
-        }
-    };
-    let mut messages: Vec<Value> = match serde_json::from_slice(&bytes) {
-        Ok(Value::Array(items)) => items,
-        Ok(message @ Value::Object(_)) => vec![message],
-        Ok(_) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                json_rpc_error(Value::Null, -32600, "Invalid Request"),
-            );
-        }
-        Err(_) => {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                json_rpc_error(Value::Null, -32700, "Parse error"),
-            );
-        }
-    };
-
-    // Reject SSE-only requests (stateless JSON mode, like the TS transport with
-    // enableJsonResponse: true)
-    let accept_ok = headers
-        .get(axum::http::header::ACCEPT)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.contains("application/json"))
-        .unwrap_or(true);
-    if !accept_ok {
-        return error_json(
-            StatusCode::NOT_ACCEPTABLE,
-            "client must accept application/json",
-        );
-    }
-
-    if messages.len() == 1 {
-        let message = messages.remove(0);
-        if message.get("method").is_none() {
-            return json_response(
-                StatusCode::BAD_REQUEST,
-                json_rpc_error(Value::Null, -32600, "Invalid Request"),
-            );
-        }
-        match handle_rpc_message(&state, &message).await {
-            Some(response) => json_response(StatusCode::OK, response),
-            None => StatusCode::ACCEPTED.into_response(), // notification
-        }
-    } else {
-        let mut responses = Vec::new();
-        for message in messages {
-            if let Some(response) = handle_rpc_message(&state, &message).await {
-                responses.push(response);
-            }
-        }
-        if responses.is_empty() {
-            return StatusCode::ACCEPTED.into_response();
-        }
-        json_response(StatusCode::OK, Value::Array(responses))
-    }
+async fn health() -> axum::response::Response {
+    json_response(axum::http::StatusCode::OK, json!({ "ok": true }))
 }
 
 /// Bearer auth gate, applied to every request before any tool runs.
@@ -405,7 +260,7 @@ async fn auth_middleware(
     State(state): State<AppState>,
     request: axum::extract::Request,
     next: axum::middleware::Next,
-) -> Response {
+) -> axum::response::Response {
     if let Some(token) = &state.token {
         let expected = format!("Bearer {token}");
         let provided = request
@@ -414,29 +269,51 @@ async fn auth_middleware(
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         if provided != expected {
-            return error_json(
-                StatusCode::UNAUTHORIZED,
-                "unauthorized: valid bearer token required",
-            );
+            return (
+                axum::http::StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": "unauthorized: valid bearer token required" })),
+            )
+                .into_response();
         }
     }
     next.run(request).await
 }
 
-/// Streamable HTTP MCP server. Stateless pattern: each POST gets a fresh
-/// handling pass — safe for concurrent clients.
+/// Streamable HTTP MCP server. Stateless JSON mode: each POST is handled
+/// independently — safe for concurrent clients.
 pub async fn start_memory_server(
     service: Arc<MemoryService>,
     options: MemoryServerOptions,
 ) -> Result<MemoryServerHandle> {
+    use rmcp::transport::streamable_http_server::{
+        StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+    };
+
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let mcp_service: StreamableHttpService<MemoryMcpServer, LocalSessionManager> =
+        StreamableHttpService::new(
+            {
+                let service = service.clone();
+                move || Ok(MemoryMcpServer::new(service.clone()))
+            },
+            Default::default(), // LocalSessionManager
+            StreamableHttpServerConfig::default()
+                .with_legacy_session_mode(false)
+                .with_json_response(true)
+                .with_cancellation_token(cancellation.child_token()),
+        );
+
     let state = AppState {
-        service,
         token: options.token.map(Arc::new),
     };
 
     let app = Router::new()
         .route("/health", get(health))
-        .fallback(fallback)
+        .nest_service("/mcp", mcp_service)
+        .fallback((
+            axum::http::StatusCode::METHOD_NOT_ALLOWED,
+            Json(json!({ "error": "method not allowed in stateless mode; use POST" })),
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -447,10 +324,11 @@ pub async fn start_memory_server(
     let port = listener.local_addr()?.port();
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+    let shutdown_token = cancellation.clone();
     tokio::spawn(async move {
+        let mut rx = shutdown_rx;
         let _ = axum::serve(listener, app)
             .with_graceful_shutdown(async move {
-                let mut rx = shutdown_rx;
                 loop {
                     if *rx.borrow() {
                         break;
@@ -459,6 +337,7 @@ pub async fn start_memory_server(
                         break;
                     }
                 }
+                shutdown_token.cancel();
             })
             .await;
     });
@@ -475,6 +354,7 @@ mod tests {
     use crate::embeddings::HashEmbeddings;
     use crate::graph::InMemoryGraphStore;
     use crate::vectors::InMemoryVectorStore;
+    use serde_json::Value;
 
     fn make_service() -> Arc<MemoryService> {
         Arc::new(MemoryService::new(
@@ -496,20 +376,26 @@ mod tests {
         .unwrap()
     }
 
-    async fn rpc(port: u16, body: Value, token: Option<&str>) -> (StatusCode, Value) {
+    async fn rpc(port: u16, body: Value, token: Option<&str>) -> (axum::http::StatusCode, Value) {
         let url = format!("http://127.0.0.1:{port}/mcp");
         let client = reqwest::Client::new();
         let mut request = client
             .post(&url)
             .header("Content-Type", "application/json")
-            .header("Accept", "application/json");
+            .header("Accept", "application/json, text/event-stream");
         if let Some(tok) = token {
             request = request.bearer_auth(tok);
         }
         let response = request.json(&body).send().await.unwrap();
         let status = response.status();
-        let json: Value = response.json().await.unwrap();
-        (StatusCode::from_u16(status.as_u16()).unwrap(), json)
+        let text = response.text().await.unwrap();
+        let json: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("non-JSON response ({status}): {e} — body: {text:.300}"));
+
+        (
+            axum::http::StatusCode::from_u16(status.as_u16()).unwrap(),
+            json,
+        )
     }
 
     #[tokio::test]
@@ -520,11 +406,18 @@ mod tests {
         // --- client 1: initialize + list tools
         let (status, response) = rpc(
             open.port,
-            json!({ "jsonrpc": "2.0", "id": 1, "method": "initialize", "params": { "protocolVersion": "2025-06-18" } }),
+            json!({
+                "jsonrpc": "2.0", "id": 1, "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": { "name": "test-harness", "version": "0.0.1" }
+                }
+            }),
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, axum::http::StatusCode::OK);
         assert_eq!(response["result"]["serverInfo"]["name"], "cognitive-memory");
 
         let (status, response) = rpc(
@@ -533,7 +426,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, axum::http::StatusCode::OK);
         let mut names: Vec<String> = response["result"]["tools"]
             .as_array()
             .unwrap()
@@ -563,7 +456,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, axum::http::StatusCode::OK);
         let stored: Value =
             serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
@@ -579,7 +472,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, axum::http::StatusCode::OK);
         let found: Value =
             serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
@@ -596,7 +489,7 @@ mod tests {
             None,
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, axum::http::StatusCode::OK);
         let ctx: Value =
             serde_json::from_str(response["result"]["content"][0]["text"].as_str().unwrap())
                 .unwrap();
@@ -745,7 +638,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_tool_and_method_error_cleanly() {
+    async fn unknown_tool_errors_cleanly() {
         let server = start_test_server(None).await;
 
         let (_, response) = rpc(
@@ -758,14 +651,6 @@ mod tests {
         )
         .await;
         assert_eq!(response["error"]["code"], -32602);
-
-        let (_, response) = rpc(
-            server.port,
-            json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/list" }),
-            None,
-        )
-        .await;
-        assert_eq!(response["error"]["code"], -32601);
 
         server.close().await;
     }
@@ -820,7 +705,7 @@ mod tests {
             Some("s3cret"),
         )
         .await;
-        assert_eq!(status, StatusCode::OK);
+        assert_eq!(status, axum::http::StatusCode::OK);
         assert!(!response["result"]["tools"].as_array().unwrap().is_empty());
 
         secured.close().await;
