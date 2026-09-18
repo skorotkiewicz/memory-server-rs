@@ -221,6 +221,11 @@ impl VectorStore for QdrantVectorStore {
     }
 
     async fn models(&self) -> anyhow::Result<Vec<String>> {
+        // fresh deployment: no collection yet → no models (avoids a scary
+        // "collection doesn't exist" error in qdrant's log on every first start)
+        if !self.collection_exists().await? {
+            return Ok(vec![]);
+        }
         let response = self
             .client
             .scroll(
