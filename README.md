@@ -1,6 +1,25 @@
-# memory-server-rs
+<p align="center">
+  <img src="assets/logo.svg" alt="Five linked memory nodes" width="112">
+</p>
 
-The Memory MCP server (Rust).
+<h1 align="center">Memory Server</h1>
+
+<p align="center">A Rust MCP server for storing, linking, and searching memories with Neo4j and Qdrant.</p>
+
+## Quick start
+
+Requires Docker and Docker Compose. The first start downloads the local embedding
+model; the cache persists in `store/model-cache`.
+
+```sh
+cp -n .env.example .env
+docker compose up -d --build
+curl http://127.0.0.1:8080/health
+```
+
+The health check returns `{"ok":true}`. By default, MCP is available at
+`http://127.0.0.1:8080/mcp`. Set `MEMORY_TOKEN` in `.env` before exposing it
+outside localhost. Change the example Neo4j password before deploying it.
 
 ## Layout
 
@@ -13,7 +32,7 @@ The Memory MCP server (Rust).
 | `src/server.rs` | Streamable HTTP MCP transport (stateless JSON mode) on axum |
 | `src/main.rs` | env wiring, `--reindex`, graceful shutdown |
 
-## Env
+## Configuration
 
 ```
 NEO4J_URI      bolt://127.0.0.1:7687
@@ -37,25 +56,6 @@ See `.env.example` for the docker-compose variables.
 ```
 cargo run -- --reindex    # rebuild the qdrant index from neo4j and exit
 ```
-
-## Tests
-
-```
-cargo test    # unit tests (in-memory stores, no services needed)
-```
-
-Integration tests against live Neo4j/Qdrant run when the corresponding env
-vars are set (containers are expected to be running, e.g. via
-`docker compose up -d neo4j qdrant`):
-
-```
-NEO4J_TEST_URI=bolt://127.0.0.1:7687 \
-NEO4J_TEST_USER=neo4j NEO4J_TEST_PASSWORD=testpassword \
-QDRANT_TEST_URL=http://127.0.0.1:6334 \
-cargo test
-```
-
-(`QDRANT_TEST_URL` points at the gRPC port, 6334.)
 
 ## MCP surface
 
@@ -87,3 +87,24 @@ Example MCP client configuration:
 For this address, set `PORT=7199`, `HOST=0.0.0.0`, and
 `ALLOWED_HOSTS=192.168.0.124:7199`. Replace `<optional>` with `MEMORY_TOKEN`,
 or omit `headers` when no token is configured.
+
+## Tests
+
+```
+cargo test    # unit tests (in-memory stores, no services needed)
+```
+
+Integration tests against live Neo4j and Qdrant run when their test env vars
+are set. Start both services first. The Compose file does not publish Qdrant's
+gRPC port (6334), so expose that port locally or use another reachable Qdrant
+instance before running:
+
+```
+NEO4J_TEST_URI=bolt://127.0.0.1:7687 \
+NEO4J_TEST_USER=neo4j NEO4J_TEST_PASSWORD=testpassword \
+QDRANT_TEST_URL=http://127.0.0.1:6334 \
+cargo test
+```
+
+`QDRANT_TEST_URL` must point at the reachable gRPC port (6334). Use throwaway
+databases for integration tests because they write data.

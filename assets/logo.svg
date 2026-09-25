@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="112" height="120" viewBox="0 0 112 120" role="img" aria-labelledby="title desc">
+  <title id="title">Memory Server logo</title>
+  <desc id="desc">Five linked memory nodes</desc>
+  <rect x="2" y="10" width="100" height="100" rx="26" fill="#e7f3ed"/>
+  <path d="M31 44 51 32 74 47 69 76 41 81 31 44Z" fill="none" stroke="#237a65" stroke-width="5" stroke-linejoin="round"/>
+  <circle cx="31" cy="44" r="7" fill="#d3794c"/>
+  <circle cx="51" cy="32" r="7" fill="#237a65"/>
+  <circle cx="74" cy="47" r="7" fill="#237a65"/>
+  <circle cx="69" cy="76" r="7" fill="#d3794c"/>
+  <circle cx="41" cy="81" r="7" fill="#237a65"/>
+</svg>
