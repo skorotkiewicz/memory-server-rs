@@ -70,10 +70,10 @@ services:
       timeout: 5s
       retries: 12
       start_period: 10s
-    # publish on localhost so host-run TUIs and external MCP harnesses connect;
+    # default to localhost for host-run clients; set HOST to expose elsewhere;
     # keep the token (MEMORY_TOKEN in .env) when exposing beyond localhost
     ports:
-      - "127.0.0.1:${PORT:-8080}:${PORT:-8080}"
+      - "${HOST:-127.0.0.1}:${PORT:-8080}:${PORT:-8080}"
 
   # rebuild the qdrant index from neo4j and exit:
   #   docker compose run --rm reindex
