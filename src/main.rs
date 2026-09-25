@@ -5,6 +5,7 @@
 //!   NEO4J_USER / NEO4J_PASSWORD (default neo4j / from NEO4J_AUTH=neo4j/<pw>)
 //!   QDRANT_URL (default http://127.0.0.1:6333), QDRANT_API_KEY
 //!   PORT (default 8080), MEMORY_TOKEN (optional bearer auth)
+//!   ALLOWED_HOSTS (optional comma-separated extra HTTP Host values for /mcp)
 //!   FASTEMBED_CACHE_PATH (persist the local model between restarts)
 //!   EMBEDDINGS_BASEURL + EMBEDDINGS_MODEL (+ EMBEDDINGS_APIKEY) for an
 //!     external OpenAI-compatible /embeddings endpoint; unset = local model.
@@ -136,6 +137,16 @@ async fn run() -> anyhow::Result<()> {
         MemoryServerOptions {
             port,
             token: token.clone(),
+            allowed_hosts: env_nonempty("ALLOWED_HOSTS")
+                .map(|hosts| {
+                    hosts
+                        .split(',')
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect()
+                })
+                .unwrap_or_default(),
         },
     )
     .await?;

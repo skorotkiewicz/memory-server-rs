@@ -25,6 +25,8 @@ pub struct MemoryServerOptions {
     pub port: u16,
     /// when set, requests without this bearer token are rejected before any tool runs
     pub token: Option<String>,
+    /// Additional HTTP Host values accepted by the MCP transport
+    pub allowed_hosts: Vec<String>,
 }
 
 pub struct MemoryServerHandle {
@@ -290,6 +292,8 @@ pub async fn start_memory_server(
     };
 
     let cancellation = tokio_util::sync::CancellationToken::new();
+    let mut config = StreamableHttpServerConfig::default();
+    config.allowed_hosts.extend(options.allowed_hosts);
     let mcp_service: StreamableHttpService<MemoryMcpServer, LocalSessionManager> =
         StreamableHttpService::new(
             {
@@ -297,7 +301,7 @@ pub async fn start_memory_server(
                 move || Ok(MemoryMcpServer::new(service.clone()))
             },
             Default::default(), // LocalSessionManager
-            StreamableHttpServerConfig::default()
+            config
                 .with_legacy_session_mode(false)
                 .with_json_response(true)
                 .with_cancellation_token(cancellation.child_token()),
@@ -370,6 +374,7 @@ mod tests {
             MemoryServerOptions {
                 port: 0,
                 token: token.map(String::from),
+                allowed_hosts: vec![],
             },
         )
         .await
@@ -667,6 +672,38 @@ mod tests {
         assert!(response.status().is_success());
         let body: Value = response.json().await.unwrap();
         assert_eq!(body["ok"], true);
+        server.close().await;
+    }
+
+    #[tokio::test]
+    async fn configured_http_hosts_are_allowed_but_other_hosts_are_rejected() {
+        let server = start_memory_server(
+            make_service(),
+            MemoryServerOptions {
+                port: 0,
+                token: None,
+                allowed_hosts: vec!["memory.test".into()],
+            },
+        )
+        .await
+        .unwrap();
+        let client = reqwest::Client::new();
+        for (host, expected) in [
+            ("memory.test", axum::http::StatusCode::OK),
+            ("127.0.0.1", axum::http::StatusCode::OK),
+            ("other.test", axum::http::StatusCode::FORBIDDEN),
+        ] {
+            let response = client
+                .post(format!("http://127.0.0.1:{}/mcp", server.port))
+                .header("Host", format!("{host}:{}", server.port))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json, text/event-stream")
+                .json(&json!({ "jsonrpc": "2.0", "id": 1, "method": "tools/list" }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected, "host: {host}");
+        }
         server.close().await;
     }
 

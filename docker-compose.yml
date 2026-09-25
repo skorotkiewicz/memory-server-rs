@@ -52,6 +52,7 @@ services:
       PORT: "${PORT:-8080}"
       # set MEMORY_TOKEN in .env to require bearer auth from MCP clients
       MEMORY_TOKEN: ${MEMORY_TOKEN:-}
+      ALLOWED_HOSTS: ${ALLOWED_HOSTS:-}
       # embeddings: unset = local bge-small-en-v1.5 (baked into the image);
       # set baseurl + model to use an external OpenAI-compatible /embeddings
       EMBEDDINGS_BASEURL: ${EMBEDDINGS_BASEURL:-}

@@ -21,6 +21,7 @@ NEO4J_USER / NEO4J_PASSWORD   (or NEO4J_AUTH=neo4j/<pw> from the neo4j image)
 QDRANT_URL     http://127.0.0.1:6333     QDRANT_API_KEY
 PORT           8080
 MEMORY_TOKEN   optional bearer auth
+ALLOWED_HOSTS  comma-separated extra HTTP Host names for /mcp (localhost allowed by default)
 FASTEMBED_CACHE_PATH           persist the local model between restarts
 EMBEDDINGS_BASEURL + EMBEDDINGS_MODEL (+ EMBEDDINGS_APIKEY)
                use an external OpenAI-compatible /embeddings endpoint;
@@ -58,6 +59,11 @@ cargo test
 ## MCP surface
 
 Stateless Streamable HTTP: `POST /mcp` (JSON-RPC), `GET /health`. Bearer token
-required on every request when `MEMORY_TOKEN` is set. Tools: `memory_store`,
+required on every request when `MEMORY_TOKEN` is set. Set `ALLOWED_HOSTS` to
+allow HTTP access through other hostnames or IPs (for example,
+`ALLOWED_HOSTS=memory.example.com,192.168.1.50`). This checks the HTTP Host
+header, not CORS or client authorization. Docker Compose still publishes the port
+on `127.0.0.1`; remote clients also need a different port binding and should
+use `MEMORY_TOKEN`. Tools: `memory_store`,
 `memory_search`, `memory_get`, `memory_link`, `memory_delete`, `memory_context`
 (camelCase records: `id`, `text`, `createdAt`, `tags`, `related`, `score`).
