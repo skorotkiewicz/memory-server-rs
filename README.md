@@ -68,3 +68,22 @@ header, not CORS or client authorization. Docker Compose publishes on `HOST`
 `MEMORY_TOKEN`. Tools: `memory_store`,
 `memory_search`, `memory_get`, `memory_link`, `memory_delete`, `memory_context`
 (camelCase records: `id`, `text`, `createdAt`, `tags`, `related`, `score`).
+
+Example MCP client configuration:
+
+```json
+{
+  "memory": {
+    "type": "http",
+    "url": "http://192.168.0.124:7199/mcp",
+    "headers": {
+      "Authorization": "Bearer <optional>"
+    },
+    "directTools": true
+  }
+}
+```
+
+For this address, set `PORT=7199`, `HOST=0.0.0.0`, and
+`ALLOWED_HOSTS=192.168.0.124:7199`. Replace `<optional>` with `MEMORY_TOKEN`,
+or omit `headers` when no token is configured.
